@@ -27,6 +27,7 @@ export interface Args {
 	sessionDir?: string;
 	models?: string[];
 	tools?: ToolName[];
+	excludeTools?: string[];
 	noTools?: boolean;
 	extensions?: string[];
 	noExtensions?: boolean;
@@ -101,8 +102,12 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 		} else if (arg === "--tools" && i + 1 < args.length) {
 			const toolNames = args[++i].split(",").map((s) => s.trim());
 			const validTools: ToolName[] = [];
+			const excludeTools: string[] = [];
 			for (const name of toolNames) {
-				if (name in allTools) {
+				if (name.startsWith("-")) {
+					// -toolname means exclude (may be extension tool, skip validation)
+					excludeTools.push(name.slice(1));
+				} else if (name in allTools) {
 					validTools.push(name as ToolName);
 				} else {
 					console.error(
@@ -111,6 +116,9 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 				}
 			}
 			result.tools = validTools;
+			if (excludeTools.length > 0) {
+				result.excludeTools = excludeTools;
+			}
 		} else if (arg === "--thinking" && i + 1 < args.length) {
 			const level = args[++i];
 			if (isValidThinkingLevel(level)) {

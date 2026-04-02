@@ -59,6 +59,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Built-in tools to use. Default: codingTools [read, bash, edit, write] */
 	tools?: Tool[];
+	/** Tool names to exclude (applies after extension tools are injected). Supports -prefix syntax from --tools flag. */
+	excludeTools?: string[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
 
@@ -348,6 +350,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		customTools: options.customTools,
 		modelRegistry,
 		initialActiveToolNames,
+		excludeToolNames: options.excludeTools,
 		extensionRunnerRef,
 	});
 	const extensionsResult = resourceLoader.getExtensions();

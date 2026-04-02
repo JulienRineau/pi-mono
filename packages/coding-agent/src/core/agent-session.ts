@@ -151,6 +151,8 @@ export interface AgentSessionConfig {
 	modelRegistry: ModelRegistry;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
+	/** Tool names to exclude (applied after extension tools are injected). */
+	excludeToolNames?: string[];
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -275,6 +277,7 @@ export class AgentSession {
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
+	private _excludeToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -305,6 +308,7 @@ export class AgentSession {
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
+		this._excludeToolNames = config.excludeToolNames ? new Set(config.excludeToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 
 		// Always subscribe to agent events for internal handling
@@ -2345,7 +2349,10 @@ export class AgentSession {
 			}
 		}
 
-		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+		const finalToolNames = this._excludeToolNames
+			? nextActiveToolNames.filter((name) => !this._excludeToolNames!.has(name))
+			: nextActiveToolNames;
+		this.setActiveToolsByName([...new Set(finalToolNames)]);
 	}
 
 	private _buildRuntime(options: {

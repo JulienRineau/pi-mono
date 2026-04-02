@@ -593,6 +593,9 @@ function buildSessionOptions(
 	} else if (parsed.tools) {
 		options.tools = parsed.tools.map((name) => allTools[name]);
 	}
+	if (parsed.excludeTools) {
+		options.excludeTools = parsed.excludeTools;
+	}
 
 	return { options, cliThinkingFromModel };
 }
