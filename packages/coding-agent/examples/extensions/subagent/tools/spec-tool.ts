@@ -18,7 +18,7 @@ import { Type } from "@sinclair/typebox";
 // Types
 export type SpecType = "bug" | "feature" | "refactor";
 export type SpecPriority = "critical" | "high" | "medium" | "low";
-export type SpecStatus = "draft" | "ready" | "in-progress" | "done" | "archived";
+export type SpecStatus = "draft" | "ready" | "in-progress" | "done" | "blocked" | "archived";
 
 export interface SpecFrontmatter {
 	[key: string]: unknown;

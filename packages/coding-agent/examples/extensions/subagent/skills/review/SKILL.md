@@ -56,6 +56,15 @@ review({
 })
 ```
 
+**When invoked by the nightshift tool**, your task includes YAML frontmatter at the top with `review-target` and `review-scope` pre-filled. Use these exact values for the `target` and `scope` parameters — they ensure your review is saved in the correct location for aggregation.
+
+```yaml
+---
+review-target: the-plan-slug
+review-scope: plan
+---
+```
+
 ## Output Format
 
 Your review content must follow this structure:

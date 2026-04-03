@@ -96,8 +96,8 @@ else
         else
             STATUS_VALUE=$(echo "$FRONTMATTER" | grep '^status:' | sed 's/^status:[[:space:]]*//' | tr -d '"' | tr -d "'")
             case "$STATUS_VALUE" in
-                draft|ready|in-progress|done|archived) ;;
-                *) error "Invalid status: '$STATUS_VALUE' (must be: draft, ready, in-progress, done, archived)" ;;
+                draft|ready|in-progress|done|blocked|archived) ;;
+                *) error "Invalid status: '$STATUS_VALUE' (must be: draft, ready, in-progress, done, blocked, archived)" ;;
             esac
         fi
 

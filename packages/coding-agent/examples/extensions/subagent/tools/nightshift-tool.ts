@@ -135,13 +135,32 @@ async function readCheckpoint(cwd: string): Promise<NightshiftCheckpoint | null>
 	}
 }
 
-function extractPlanPath(output: string): string | null {
-	// Look for plan file path in agent output
+function extractPlanPath(output: string, cwd: string): string | null {
+	// Try regex patterns first
 	const patterns = [/plans\/[\w-]+-v\d+\.md/, /Plan saved to:\s*(.+\.md)/, /plan[_ ]?path[: ]+(.+\.md)/i];
 	for (const pattern of patterns) {
 		const match = output.match(pattern);
 		if (match) return match[0].startsWith("plans/") ? match[0] : match[1];
 	}
+
+	// Fallback: find the most recently modified plan file
+	const plansDir = path.join(cwd, "plans");
+	if (existsSync(plansDir)) {
+		try {
+			const fsSync = require("node:fs");
+			const files = (fsSync.readdirSync(plansDir) as string[])
+				.filter((f: string) => f.endsWith(".md"))
+				.map((f: string) => ({
+					name: f,
+					mtime: fsSync.statSync(path.join(plansDir, f)).mtimeMs as number,
+				}))
+				.sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime);
+			if (files.length > 0) return `plans/${files[0].name}`;
+		} catch {
+			/* ignore */
+		}
+	}
+
 	return null;
 }
 
@@ -358,7 +377,7 @@ async function startNightshift(
 				throw new Error("Planner failed");
 			}
 
-			const planPath = extractPlanPath(planOutput);
+			const planPath = extractPlanPath(planOutput, ctx.cwd);
 			if (!planPath) {
 				emitProgress("plan", "Could not extract plan path from planner output");
 				specFailed = true;
@@ -383,7 +402,21 @@ async function startNightshift(
 				// Run all reviewers in parallel
 				const reviewTasks = REVIEWER_AGENTS.map((reviewer) => ({
 					agent: reviewer,
-					task: `Review this plan (scope: plan, target: ${slug}):\n\n## Spec\n${specContent}\n\n## Plan\n${planContent}`,
+					task: [
+						`---`,
+						`review-target: ${slug}`,
+						`review-scope: plan`,
+						`---`,
+						``,
+						`Review the plan below. Use the metadata above for the review tool:`,
+						`review({ action: "save", target: "${slug}", scope: "plan", reviewer: "your-name", verdict: "...", content: "..." })`,
+						``,
+						`## Spec`,
+						specContent,
+						``,
+						`## Plan`,
+						planContent,
+					].join("\n"),
 				}));
 
 				await mapWithConcurrencyLimit(reviewTasks, MAX_CONCURRENCY, async (task) => {
@@ -547,7 +580,20 @@ async function startNightshift(
 
 				const reviewTasks = REVIEWER_AGENTS.map((reviewer) => ({
 					agent: reviewer,
-					task: `Review the implementation (scope: implementation, target: ${slug}). Run git diff to see changes.\n\nSpec:\n${specContent}`,
+					task: [
+						`---`,
+						`review-target: ${slug}`,
+						`review-scope: implementation`,
+						`---`,
+						``,
+						`Review the implementation. Use the metadata above for the review tool:`,
+						`review({ action: "save", target: "${slug}", scope: "implementation", reviewer: "your-name", verdict: "...", content: "..." })`,
+						``,
+						`Run git diff to see what changed.`,
+						``,
+						`## Spec`,
+						specContent,
+					].join("\n"),
 				}));
 
 				await mapWithConcurrencyLimit(reviewTasks, MAX_CONCURRENCY, async (task) => {
