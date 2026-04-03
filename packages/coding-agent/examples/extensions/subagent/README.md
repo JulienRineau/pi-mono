@@ -10,19 +10,29 @@ Delegate tasks to specialized subagents with isolated context windows.
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
 - **Usage tracking**: Shows turns, tokens, cost, and context usage per agent
 - **Abort support**: Ctrl+C propagates to kill subagent processes
+- **Plan files**: Save plans to `plans/` directory with versioning
+- **Task tracking**: Track task progress with `todo_write` tool
 
 ## Structure
 
 ```
 subagent/
-├── README.md            # This file
-├── index.ts             # The extension (entry point)
-├── agents.ts            # Agent discovery logic
-├── agents/              # Sample agent definitions
+├── README.md             # This file
+├── index.ts              # The extension (entry point)
+├── agents.ts             # Agent discovery logic
+├── agents/               # Sample agent definitions
 │   ├── scout.md         # Fast recon, returns compressed context
 │   ├── planner.md       # Creates implementation plans
-│   ├── reviewer.md      # Code review
+│   ├── reviewer.md       # Code review
 │   └── worker.md        # General-purpose (full capabilities)
+├── tools/               # Additional tools
+│   ├── plan-tool.ts     # Create, read, update plan files
+│   └── todo-write-tool.ts # Track task progress
+├── skills/              # Agent guidance skills
+│   ├── create-plan/     # Guide plan creation
+│   └── execute-plan/    # Guide plan execution
+├── scripts/             # Helper scripts
+│   └── validate-plan.sh # Validate plan format
 └── prompts/             # Workflow presets (prompt templates)
     ├── implement.md     # scout -> planner -> worker
     ├── scout-and-plan.md    # scout -> planner (no implementation)
@@ -36,8 +46,8 @@ From the repository root, symlink the files:
 ```bash
 # Symlink the extension (must be in a subdirectory with index.ts)
 mkdir -p ~/.pi/agent/extensions/subagent
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.pi/agent/extensions/subagent/index.ts
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.pi/agent/extensions/subagent/agents.ts
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.pi/agent/extensions/subagent/
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.pi/agent/extensions/subagent/
 
 # Symlink agents
 mkdir -p ~/.pi/agent/agents
@@ -45,11 +55,16 @@ for f in packages/coding-agent/examples/extensions/subagent/agents/*.md; do
   ln -sf "$(pwd)/$f" ~/.pi/agent/agents/$(basename "$f")
 done
 
-# Symlink workflow prompts
-mkdir -p ~/.pi/agent/prompts
-for f in packages/coding-agent/examples/extensions/subagent/prompts/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/prompts/$(basename "$f")
-done
+# Symlink skills
+mkdir -p ~/.pi/agent/skills
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/skills/*" ~/.pi/agent/skills/
+
+# Symlink validation script
+mkdir -p ~/.pi/agent/scripts
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/scripts/validate-plan.sh ~/.pi/agent/scripts/
+
+# Create plans directory
+mkdir -p plans/
 ```
 
 ## Security Model
@@ -88,37 +103,86 @@ Use a chain: first have scout find the read tool, then have planner suggest impr
 /implement-and-review add input validation to API endpoints
 ```
 
-## Tool Modes
+### Plan Management
+```
+Use plan tool to save plans to files:
+plan({ action: "save", plan_name: "add-auth", content: "...", version: 1 })
 
-| Mode | Parameter | Description |
-|------|-----------|-------------|
-| Single | `{ agent, task }` | One agent, one task |
-| Parallel | `{ tasks: [...] }` | Multiple agents run concurrently (max 8, 4 concurrent) |
-| Chain | `{ chain: [...] }` | Sequential with `{previous}` placeholder |
+Use todo_write to track tasks:
+todo_write({ action: "init", tasks: [...] })
+todo_write({ action: "update", id: "1", status: "completed" })
+```
 
-## Output Display
+## Tools
 
-**Collapsed view** (default):
-- Status icon (✓/✗/⏳) and agent name
-- Last 5-10 items (tool calls and text)
-- Usage stats: `3 turns ↑input ↓output RcacheRead WcacheWrite $cost ctx:contextTokens model`
+### subagent Tool
 
-**Expanded view** (Ctrl+O):
-- Full task text
-- All tool calls with formatted arguments
-- Final output rendered as Markdown
-- Per-task usage (for chain/parallel)
+The main tool for spawning subagent processes.
 
-**Parallel mode streaming**:
-- Shows all tasks with live status (⏳ running, ✓ done, ✗ failed)
-- Updates as each task makes progress
-- Shows "2/3 done, 1 running" status
+| Parameter | Description |
+|-----------|-------------|
+| `agent` | Single agent name |
+| `task` | Task description |
+| `tasks` | Array for parallel execution |
+| `chain` | Array for sequential execution |
 
-**Tool call formatting** (mimics built-in tools):
-- `$ command` for bash
-- `read ~/path:1-10` for read
-- `grep /pattern/ in ~/path` for grep
-- etc.
+### plan Tool
+
+Create and manage plan files.
+
+```typescript
+// Save a plan
+plan({ action: "save", plan_name: "add-auth", content: "# Plan...", version: 1 })
+
+// Read a plan
+plan({ action: "read", plan_path: "plans/2025-03-30-add-auth-v1.md" })
+
+// Update status
+plan({ action: "update-status", name: "add-auth", status: "completed" })
+
+// List all plans
+plan({ action: "list" })
+```
+
+**File format:** `plans/{YYYY-MM-DD}-{task-name}-v{version}.md`
+
+**Features:**
+- Auto-increments version if file exists
+- Status tracking: draft, approved, in-progress, completed, abandoned
+
+### todo_write Tool
+
+Track task progress for plan execution.
+
+```typescript
+// Initialize tasks
+todo_write({ action: "init", tasks: [
+  { id: "1", description: "Configure Auth0", file: "src/config/auth0.ts", status: "pending" },
+  { id: "2", description: "Create middleware", file: "src/middleware/auth.ts", status: "pending" }
+]})
+
+// Update a task
+todo_write({ action: "update", id: "1", status: "in_progress" })
+todo_write({ action: "update", id: "1", status: "completed" })
+
+// Get current state
+todo_write({ action: "get" })
+
+// Clear all
+todo_write({ action: "clear" })
+```
+
+**Status values:** `pending`, `in_progress`, `completed`, `cancelled`
+
+**Display:**
+```
+☐ 1: Configure Auth0 (src/config/auth0.ts)
+~ 2: Create middleware (src/middleware/auth.ts)
+☑ 3: Update user model
+
+Progress: 1/3 completed
+1 in progress
+```
 
 ## Agent Definitions
 
@@ -149,6 +213,65 @@ Project agents override user agents with the same name when `agentScope: "both"`
 | `planner` | Implementation plans | Sonnet | read, grep, find, ls |
 | `reviewer` | Code review | Sonnet | read, grep, find, ls, bash |
 | `worker` | General-purpose | Sonnet | (all default) |
+
+## Plan Format
+
+Plans should use this format:
+
+```markdown
+# Plan: Add Authentication
+
+**Created:** 2025-03-30
+**Version:** v1
+**Status:** draft
+
+---
+
+## Task
+Add OAuth authentication to the API
+
+## Requirements
+
+| ID | Priority | Description |
+|----|----------|-------------|
+| 1 | high | OAuth social login |
+| 2 | medium | Session management |
+
+## Implementation Plan
+
+### 1. [ ] Configure Auth0 Application
+
+**Description:** Set up OAuth provider
+**File:** `src/config/auth0.ts`
+**Changes:** Add OAuth configuration
+
+### 2. [ ] Create Auth Middleware
+
+**Description:** JWT validation
+**File:** `src/middleware/auth.ts`
+**Changes:** Add JWT verification
+
+## Risks
+- OAuth callback configuration complexity
+
+## Next Steps
+- [ ] Step 1
+- [ ] Step 2
+```
+
+## Validation
+
+Use `validate-plan.sh` to check plan format:
+
+```bash
+./scripts/validate-plan.sh "plan content"
+```
+
+Checks:
+- Required sections (Task, Analysis, Implementation Plan)
+- Checkbox format: `- [ ]` or `- [x]`
+- Step fields: Description, File, Changes
+- Requirement priorities
 
 ## Workflow Prompts
 

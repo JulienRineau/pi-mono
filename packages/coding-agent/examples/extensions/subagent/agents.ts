@@ -12,6 +12,7 @@ export interface AgentConfig {
 	name: string;
 	description: string;
 	tools?: string[];
+	excludeTools?: string[];
 	model?: string;
 	systemPrompt: string;
 	source: "user" | "project";
@@ -55,15 +56,18 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			continue;
 		}
 
-		const tools = frontmatter.tools
+		const allTools = frontmatter.tools
 			?.split(",")
 			.map((t: string) => t.trim())
 			.filter(Boolean);
+		const tools = allTools?.filter((t: string) => !t.startsWith("-"));
+		const excludeTools = allTools?.filter((t: string) => t.startsWith("-")).map((t: string) => t.slice(1));
 
 		agents.push({
 			name: frontmatter.name,
 			description: frontmatter.description,
 			tools: tools && tools.length > 0 ? tools : undefined,
+			excludeTools: excludeTools && excludeTools.length > 0 ? excludeTools : undefined,
 			model: frontmatter.model,
 			systemPrompt: body,
 			source,

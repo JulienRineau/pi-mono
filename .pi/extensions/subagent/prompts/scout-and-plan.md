@@ -1,9 +1,21 @@
 ---
-description: Scout gathers context, planner creates implementation plan (no implementation)
+description: Scout gathers context, planner creates execution plan (no implementation)
 ---
-Use the subagent tool with the chain parameter to execute this workflow:
+Before invoking the chain, write a **task brief** that captures everything the planner needs to know. The planner has NO access to this conversation — anything not in the brief is lost.
+
+The brief must include:
+- **Why this work matters** from the user's perspective
+- **What someone can do after** this change that they cannot do before
+- **How to see it working** (commands to run, expected output, observable behavior)
+- **Key decisions already made** in this conversation
+- **Constraints or requirements** the user specified
+- **Any context about the broader goal** that shapes implementation choices
+
+Format the brief as a clear document, then pass it as the task to the chain.
+
+Use the subagent tool with the chain parameter:
 
 1. First, use the "scout" agent to find all code relevant to: $@
-2. Then, use the "planner" agent to create an implementation plan for "$@" using the context from the previous step (use {previous} placeholder)
+2. Then, use the "planner" agent to create an execution plan using both the task brief AND the code context from the previous step (use {previous} placeholder). Include the full task brief in the planner's task description — do not rely on {previous} alone for the task context.
 
-Execute this as a chain, passing output between steps via {previous}. Do NOT implement - just return the plan.
+Execute this as a chain, passing output between steps via {previous}. Do NOT implement — just return the plan.
