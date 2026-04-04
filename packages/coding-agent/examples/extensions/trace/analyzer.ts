@@ -72,6 +72,7 @@ export interface ListFilters {
 	outcome?: string;
 	tags?: string[];
 	parent?: string;
+	project?: string;
 }
 
 export function listTraces(tracesDir: string, filters?: ListFilters): IndexEntry[] {
@@ -94,6 +95,9 @@ export function listTraces(tracesDir: string, filters?: ListFilters): IndexEntry
 		}
 		if (filters.parent) {
 			entries = entries.filter((e) => e.parent === filters.parent);
+		}
+		if (filters.project) {
+			entries = entries.filter((e) => e.cwd?.includes(filters.project!));
 		}
 	}
 
@@ -340,6 +344,7 @@ export function repairTraces(tracesDir: string): { repaired: number } {
 				}
 				entries.push({
 					session_id: sessionId,
+					cwd: (header.cwd as string) || "",
 					title: "(incomplete — recovered)",
 					started_at: (header.started_at as string) || "",
 					ended_at: "",

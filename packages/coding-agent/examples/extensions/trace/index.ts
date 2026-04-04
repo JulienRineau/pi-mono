@@ -173,6 +173,7 @@ function registerTraceTool(pi: ExtensionAPI): void {
 		outcome: Type.Optional(Type.String({ description: "Outcome filter for list: success, error, incomplete" })),
 		tags: Type.Optional(Type.Array(Type.String(), { description: "Tags to add (tag action) or filter by (list)" })),
 		parent: Type.Optional(Type.String({ description: "Parent session filter for list" })),
+		project: Type.Optional(Type.String({ description: "Filter by project directory (cwd substring match)" })),
 		title: Type.Optional(Type.String({ description: "New title for title action" })),
 		keep: Type.Optional(Type.Integer({ description: "Number of sessions to keep for cleanup (default 50)" })),
 	});
@@ -187,8 +188,8 @@ function registerTraceTool(pi: ExtensionAPI): void {
 			"cleanup (retention), repair (fix incomplete traces).",
 		parameters: TraceParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const tracesDir = getTracesDir(ctx.cwd);
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const tracesDir = getTracesDir();
 
 			switch (params.action) {
 				case "list": {
@@ -198,6 +199,7 @@ function registerTraceTool(pi: ExtensionAPI): void {
 						outcome: params.outcome,
 						tags: params.tags,
 						parent: params.parent,
+						project: params.project,
 					});
 
 					if (entries.length === 0) {

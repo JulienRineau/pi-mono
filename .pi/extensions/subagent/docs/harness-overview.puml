@@ -1,0 +1,153 @@
+@startuml Harness Overview
+
+title Pi Harness — Overall Infrastructure
+
+skinparam backgroundColor white
+skinparam componentBorderColor #333333
+skinparam packageBorderColor #666666
+skinparam noteBorderColor #CCCCCC
+skinparam arrowColor #555555
+skinparam defaultTextAlignment center
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+
+' ── Actors ──────────────────────────────────────────────────────────
+
+actor "Human" as H
+
+' ── Knowledge Layer ─────────────────────────────────────────────────
+
+package "Repository Knowledge (System of Record)" as knowledge {
+  [AGENTS.md\n~map, pointers~] as agents_md
+  [ARCHITECTURE.md\n~modules, boundaries,\ndependency flow~] as arch_md
+  [README.md files\n~per-package docs~] as readmes
+  [CHANGELOG.md files\n~per-package history~] as changelogs
+  [TODOS.md\n~captured observations~] as todos
+}
+
+' ── Specs & Plans ──────────────────────────────────────────────────
+
+package "Work Artifacts" as artifacts {
+  database "specs/" as specs
+  database "plans/" as plans
+  database "reviews/" as reviews
+  database "reports/" as reports
+}
+
+' ── Enforcement Layer ──────────────────────────────────────────────
+
+package "Mechanical Enforcement" as enforcement {
+  [Linter Extension\n~structural checks,\nimport rules, boundaries,\ntool misuse~] as linter
+
+  [Biome\n~formatting, style,\nstandard lint rules~] as biome
+
+  [TypeScript\n~type checking~] as tsc
+
+  [Husky Pre-commit\n~last safety net~] as husky
+}
+
+note bottom of linter
+  Custom lint error messages
+  inject remediation hints
+  into agent context
+end note
+
+' ── Agent Layer ────────────────────────────────────────────────────
+
+package "Agents" as agent_layer {
+  [Scout\n~fast codebase recon~] as scout
+  [Planner\n~execution plans~] as planner
+  [Worker\n~implements plans~] as worker
+  [Tester\n~TDD, tests first~] as tester
+  collections "6 Reviewers\n~arch, security, perf,\ndomain, code, UX~" as reviewers
+  [GC Agent\n~scan drift, open\nrefactor specs~] as gc
+  [Doc Gardener\n~validate freshness,\nopen fix-up specs~] as doc_gardener
+}
+
+' ── Skills Layer ───────────────────────────────────────────────────
+
+package "Skills (prompt modules)" as skills {
+  [create-plan] as sk_plan
+  [execute-plan] as sk_exec
+  [test-first] as sk_test
+  [review-*] as sk_review
+  [gc] as sk_gc
+  [doc-garden] as sk_doc
+}
+
+' ── Orchestration Layer ────────────────────────────────────────────
+
+package "Orchestration" as orchestration {
+  [Night Shift\n~autonomous spec loop\n(see dedicated diagram)~] as nightshift
+  [Main Agent\n~interactive session~] as main_agent
+}
+
+' ── Extension System ───────────────────────────────────────────────
+
+package "Extensions" as extensions {
+  [Subagent Extension\n~agent spawning, tools~] as subagent_ext
+  [Trace Extension\n~session observability~] as trace_ext
+  [Linter Extension] as linter_ext
+}
+
+' ── Observability (user-level) ────────────────────────────────────
+
+database "~/.pi/agent/traces/\n~session recordings,\nindex, parent-child links~" as traces_db
+
+' ── Relationships ──────────────────────────────────────────────────
+
+' Human interactions
+H --> main_agent : interactive\nwork
+H --> specs : writes specs
+H --> nightshift : launches
+
+' Main agent uses knowledge
+main_agent --> agents_md : reads map
+main_agent --> arch_md : reads structure
+
+' Nightshift orchestrates agents
+nightshift --> scout
+nightshift --> planner
+nightshift --> tester
+nightshift --> worker
+nightshift --> reviewers
+
+' Agents use skills
+scout ..> sk_plan : loads
+planner ..> sk_plan
+worker ..> sk_exec
+tester ..> sk_test
+reviewers ..> sk_review
+gc ..> sk_gc
+doc_gardener ..> sk_doc
+
+' Agents produce artifacts
+planner --> plans : writes
+reviewers --> reviews : writes
+nightshift --> reports : writes
+
+' Enforcement integration
+nightshift --> linter : quality gates
+nightshift --> tsc : typecheck
+nightshift --> biome : format check
+linter --> main_agent : beforeToolCall\n~real-time interception~
+husky --> linter : pre-commit
+husky --> biome : pre-commit
+
+' GC and Doc Gardener
+gc --> linter : runs checks
+gc --> todos : reads observations
+gc --> specs : opens refactor specs
+doc_gardener --> agents_md : validates
+doc_gardener --> arch_md : validates
+doc_gardener --> readmes : validates
+doc_gardener --> specs : opens fix-up specs
+
+' Trace observability
+trace_ext --> traces_db : writes
+
+' Knowledge references
+agents_md ..> readmes : points to
+agents_md ..> arch_md : points to
+
+@enduml

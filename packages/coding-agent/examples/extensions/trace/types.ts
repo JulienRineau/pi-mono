@@ -15,6 +15,7 @@ export interface TraceEvent {
 /** A single line in index.jsonl — summary of one trace */
 export interface IndexEntry {
 	session_id: string;
+	cwd: string;
 	title: string;
 	started_at: string;
 	ended_at: string;

@@ -6,13 +6,23 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import type { IndexEntry, TraceEvent, TraceState } from "./types.js";
 
 // ── Directory & Path Helpers ──────────────────────────────────
 
-export function getTracesDir(cwd: string): string {
-	const dir = path.join(cwd, ".pi", "traces");
+export function getTracesDir(): string {
+	const envDir = process.env.PI_CODING_AGENT_DIR;
+	let agentDir: string;
+	if (envDir) {
+		if (envDir === "~") agentDir = homedir();
+		else if (envDir.startsWith("~/")) agentDir = homedir() + envDir.slice(1);
+		else agentDir = envDir;
+	} else {
+		agentDir = path.join(homedir(), ".pi", "agent");
+	}
+	const dir = path.join(agentDir, "traces");
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true });
 	}
@@ -55,7 +65,7 @@ export function appendIndexEntry(tracesDir: string, entry: IndexEntry): void {
 // ── Trace Lifecycle ───────────────────────────────────────────
 
 export function initTrace(sessionId: string, cwd: string, model: string): TraceState {
-	const tracesDir = getTracesDir(cwd);
+	const tracesDir = getTracesDir();
 	const traceFilePath = getTraceFilePath(tracesDir, sessionId);
 
 	const state: TraceState = {
@@ -89,6 +99,7 @@ export function initTrace(sessionId: string, cwd: string, model: string): TraceS
 	// Write initial index entry with "incomplete" status (crash safety)
 	appendIndexEntry(tracesDir, {
 		session_id: sessionId,
+		cwd,
 		title: "(running)",
 		started_at: new Date().toISOString(),
 		ended_at: "",
@@ -127,6 +138,7 @@ export function finalizeTrace(state: TraceState, outcome: "success" | "error", a
 	// Append final index entry (readers use the last entry for a given session_id)
 	appendIndexEntry(state.tracesDir, {
 		session_id: state.sessionId,
+		cwd: state.cwd,
 		title,
 		started_at: new Date(state.startedAt).toISOString(),
 		ended_at: endedAt,
