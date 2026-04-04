@@ -38,6 +38,7 @@ export interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	sessionId?: string;
 }
 
 export interface SubagentDetails {
@@ -246,6 +247,12 @@ export async function runSingleAgent(
 				try {
 					event = JSON.parse(line);
 				} catch {
+					return;
+				}
+
+				// Capture child's session ID from the session header event
+				if (event.type === "session" && event.id) {
+					currentResult.sessionId = event.id as string;
 					return;
 				}
 

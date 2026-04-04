@@ -171,7 +171,18 @@ function planSlug(planPath: string): string {
 
 // ── Core Loop ──────────────────────────────────────────────────────
 
+function emitChildLinked(pi: ExtensionAPI, result: SingleResult, spec: string | undefined, phase: string) {
+	if (result.sessionId) {
+		pi.events.emit("trace.child.linked", {
+			child_session: result.sessionId,
+			agent: result.agent,
+			context: { spec, phase },
+		});
+	}
+}
+
 async function startNightshift(
+	pi: ExtensionAPI,
 	params: NightshiftParams,
 	signal: AbortSignal | undefined,
 	onUpdate: ((partial: AgentToolResult<NightshiftDetails>) => void) | undefined,
@@ -304,6 +315,7 @@ async function startNightshift(
 				undefined,
 				makeDetails,
 			);
+			emitChildLinked(pi, scoutResult, currentSpec, "scout");
 			const scoutContext = getFinalOutput(scoutResult.messages);
 
 			if (scoutResult.exitCode !== 0) {
@@ -325,6 +337,7 @@ async function startNightshift(
 				undefined,
 				makeDetails,
 			);
+			emitChildLinked(pi, testerResult, currentSpec, "write-tests");
 
 			let testerContext = "";
 			if (testerResult.exitCode !== 0) {
@@ -369,6 +382,7 @@ async function startNightshift(
 				undefined,
 				makeDetails,
 			);
+			emitChildLinked(pi, planResult, currentSpec, "plan");
 			const planOutput = getFinalOutput(planResult.messages);
 
 			if (planResult.exitCode !== 0) {
@@ -420,7 +434,7 @@ async function startNightshift(
 				}));
 
 				await mapWithConcurrencyLimit(reviewTasks, MAX_CONCURRENCY, async (task) => {
-					return runSingleAgent(
+					const result = await runSingleAgent(
 						ctx.cwd,
 						agents,
 						task.agent,
@@ -431,6 +445,8 @@ async function startNightshift(
 						undefined,
 						makeDetails,
 					);
+					emitChildLinked(pi, result, currentSpec, "review-plan");
+					return result;
 				});
 
 				// Aggregate reviews
@@ -447,7 +463,7 @@ async function startNightshift(
 					// Feed feedback to planner for revision
 					const feedbackText = aggregate.content[0]?.type === "text" ? aggregate.content[0].text : "";
 					emitProgress("review-plan", "Revising plan based on review feedback...");
-					await runSingleAgent(
+					const revisionResult = await runSingleAgent(
 						ctx.cwd,
 						agents,
 						"planner",
@@ -458,6 +474,7 @@ async function startNightshift(
 						undefined,
 						makeDetails,
 					);
+					emitChildLinked(pi, revisionResult, currentSpec, "plan-revision");
 				}
 			}
 
@@ -480,6 +497,7 @@ async function startNightshift(
 				undefined,
 				makeDetails,
 			);
+			emitChildLinked(pi, workerResult, currentSpec, "implement");
 
 			if (workerResult.exitCode !== 0) {
 				emitProgress("implement", `Worker failed: ${workerResult.stderr || workerResult.errorMessage}`);
@@ -500,7 +518,7 @@ async function startNightshift(
 
 				// One fix attempt
 				const planTestOutput = planTestResult.content[0]?.type === "text" ? planTestResult.content[0].text : "";
-				await runSingleAgent(
+				const fixResult = await runSingleAgent(
 					ctx.cwd,
 					agents,
 					"worker",
@@ -511,6 +529,7 @@ async function startNightshift(
 					undefined,
 					makeDetails,
 				);
+				emitChildLinked(pi, fixResult, currentSpec, "quality-fix");
 
 				const retryResult = await runPlanTests({ plan: planPath }, ctx);
 				const retryDetails = retryResult.details as any;
@@ -532,7 +551,7 @@ async function startNightshift(
 					emitProgress("quality-gates", "Full test suite has failures — asking worker to fix...");
 					qualityPassed = false;
 
-					await runSingleAgent(
+					const regressionFixResult = await runSingleAgent(
 						ctx.cwd,
 						agents,
 						"worker",
@@ -543,6 +562,7 @@ async function startNightshift(
 						undefined,
 						makeDetails,
 					);
+					emitChildLinked(pi, regressionFixResult, currentSpec, "regression-fix");
 
 					const fullRetry = await runAllTests({}, ctx);
 					const fullRetryDetails = fullRetry.details as any;
@@ -597,7 +617,7 @@ async function startNightshift(
 				}));
 
 				await mapWithConcurrencyLimit(reviewTasks, MAX_CONCURRENCY, async (task) => {
-					return runSingleAgent(
+					const result = await runSingleAgent(
 						ctx.cwd,
 						agents,
 						task.agent,
@@ -608,6 +628,8 @@ async function startNightshift(
 						undefined,
 						makeDetails,
 					);
+					emitChildLinked(pi, result, currentSpec, "review-impl");
+					return result;
 				});
 
 				const aggregate = await aggregateReviews({ target: slug }, ctx);
@@ -622,7 +644,7 @@ async function startNightshift(
 				if (reviewIter < maxReviewIterations - 1) {
 					const feedbackText = aggregate.content[0]?.type === "text" ? aggregate.content[0].text : "";
 					emitProgress("review-impl", "Worker addressing review feedback...");
-					await runSingleAgent(
+					const reviewFixResult = await runSingleAgent(
 						ctx.cwd,
 						agents,
 						"worker",
@@ -633,6 +655,7 @@ async function startNightshift(
 						undefined,
 						makeDetails,
 					);
+					emitChildLinked(pi, reviewFixResult, currentSpec, "review-impl-fix");
 
 					// Re-run plan tests after fixes
 					const rerunResult = await runPlanTests({ plan: planPath }, ctx);
@@ -645,7 +668,7 @@ async function startNightshift(
 			// ── CHANGELOG ────────────────────────────────────────
 			if (existsSync(path.join(ctx.cwd, "CHANGELOG.md"))) {
 				emitProgress("changelog", `Writing CHANGELOG entry for: ${specTitle}`);
-				await runSingleAgent(
+				const changelogResult = await runSingleAgent(
 					ctx.cwd,
 					agents,
 					"worker",
@@ -667,6 +690,7 @@ async function startNightshift(
 					undefined,
 					makeDetails,
 				);
+				emitChildLinked(pi, changelogResult, currentSpec, "changelog");
 			}
 
 			// ── COMMIT ───────────────────────────────────────────
@@ -703,6 +727,7 @@ async function startNightshift(
 				undefined,
 				makeDetails,
 			);
+			emitChildLinked(pi, commitMsgResult, currentSpec, "commit-message");
 
 			const detailedMsg = getFinalOutput(commitMsgResult.messages) || `nightshift: ${specTitle}`;
 
@@ -831,7 +856,7 @@ export function registerNightshiftTool(pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			switch (params.action) {
 				case "start":
-					return await startNightshift(params, signal, onUpdate, ctx);
+					return await startNightshift(pi, params, signal, onUpdate, ctx);
 
 				case "status": {
 					const checkpoint = await readCheckpoint(ctx.cwd);
