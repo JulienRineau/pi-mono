@@ -28,7 +28,6 @@ import {
 } from "../runtime.js";
 import { pickNextSpec, readSpec, updateSpecStatus } from "./spec-tool.js";
 import { aggregateReviews } from "./review-tool.js";
-import { saveReport } from "./report-tool.js";
 import { runPlanTests, runAllTests } from "./test-tool.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -689,7 +688,7 @@ async function startNightshift(
 	}
 
 	// ─── FINALIZE ────────────────────────────────────────────────
-	emitProgress("finalize", "Generating report...");
+	emitProgress("finalize", "Finalizing...");
 	const completedAt = new Date().toISOString();
 
 	// Count commits
@@ -701,35 +700,6 @@ async function startNightshift(
 		});
 		commitCount = logOutput.trim().split("\n").filter(Boolean).length;
 	} catch { /* ignore */ }
-
-	const reportContent = [
-		"---",
-		`session: ${date}`,
-		`started-at: ${startedAt}`,
-		`completed-at: ${completedAt}`,
-		`specs-completed: ${completed.length}`,
-		`specs-failed: ${failed.length}`,
-		`total-commits: ${commitCount}`,
-		"---",
-		"",
-		"## Completed",
-		...completed.map((s) => `- [x] ${s}`),
-		...(completed.length === 0 ? ["- (none)"] : []),
-		"",
-		"## Failed / Blocked",
-		...failed.map((s) => `- [ ] ${s}`),
-		...(failed.length === 0 ? ["- (none)"] : []),
-		"",
-		"## Key Decisions",
-		"- See individual plan decision logs for details",
-		"",
-		"## Summary",
-		`Processed ${completed.length + failed.length} specs: ${completed.length} completed, ${failed.length} failed.`,
-		`Branch: ${branchName}`,
-		`Duration: ${Math.round((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 60000)} minutes`,
-	].join("\n");
-
-	await saveReport({ content: reportContent }, ctx);
 
 	currentState = "done";
 	await saveCheckpoint(ctx.cwd, {
