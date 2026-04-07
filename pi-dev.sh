@@ -17,6 +17,11 @@ fi
 # Build packages that need building
 npm run --prefix "$REPO_ROOT" build
 
+# Ensure node_modules is accessible from this worktree
+if [[ ! -d "$SCRIPT_DIR/node_modules" && -d "$REPO_ROOT/node_modules" ]]; then
+    ln -s "$REPO_ROOT/node_modules" "$SCRIPT_DIR/node_modules"
+fi
+
 # Run local pi from the repo
 TSX_BIN="$REPO_ROOT/node_modules/.bin/tsx"
 "$TSX_BIN" "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" "$@"
