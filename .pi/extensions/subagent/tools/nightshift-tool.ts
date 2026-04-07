@@ -182,6 +182,10 @@ function emitChildLinked(pi: ExtensionAPI, result: SingleResult, spec: string | 
 	}
 }
 
+function emitNightshiftEvent(pi: ExtensionAPI, event: string, data: Record<string, unknown>) {
+	pi.events.emit("trace.nightshift", { event, ...data });
+}
+
 async function startNightshift(
 	pi: ExtensionAPI,
 	params: NightshiftParams,
@@ -265,6 +269,7 @@ async function startNightshift(
 			return errorResult(`Failed to create/switch to branch ${branchName}: ${err.message}`);
 		}
 	}
+	emitNightshiftEvent(pi, "branch", { branch: branchName });
 
 	// ─── MAIN LOOP ───────────────────────────────────────────────
 	while (completed.length + failed.length < maxSpecs) {
@@ -290,6 +295,7 @@ async function startNightshift(
 
 		currentSpec = specDetails.filename || path.basename(specDetails.path);
 		emitProgress("pick-spec", `Selected: ${currentSpec}`);
+		emitNightshiftEvent(pi, "spec.picked", { spec: currentSpec, title: specDetails.title || currentSpec });
 
 		// Read full spec content
 		const specRead = await readSpec({ spec_path: specDetails.path }, ctx);
@@ -313,6 +319,7 @@ async function startNightshift(
 			emitChildLinked(pi, scoutResult, currentSpec, "scout");
 			const scoutContext = getFinalOutput(scoutResult.messages);
 
+			emitNightshiftEvent(pi, "scout.done", { spec: currentSpec!, exit_code: scoutResult.exitCode });
 			if (scoutResult.exitCode !== 0) {
 				emitProgress("scout", `Scout failed: ${scoutResult.stderr || scoutResult.errorMessage}`);
 				specFailed = true;
@@ -328,6 +335,7 @@ async function startNightshift(
 			);
 			emitChildLinked(pi, testerResult, currentSpec, "write-tests");
 
+			emitNightshiftEvent(pi, "tests.done", { spec: currentSpec!, exit_code: testerResult.exitCode });
 			let testerContext = "";
 			if (testerResult.exitCode !== 0) {
 				emitProgress("write-tests", `Tester failed: ${testerResult.stderr || testerResult.errorMessage}`);
@@ -367,6 +375,7 @@ async function startNightshift(
 			emitChildLinked(pi, planResult, currentSpec, "plan");
 			const planOutput = getFinalOutput(planResult.messages);
 
+			emitNightshiftEvent(pi, "plan.done", { spec: currentSpec!, exit_code: planResult.exitCode });
 			if (planResult.exitCode !== 0) {
 				emitProgress("plan", `Planner failed: ${planResult.stderr || planResult.errorMessage}`);
 				specFailed = true;
@@ -428,6 +437,7 @@ async function startNightshift(
 				const aggregate = await aggregateReviews({ target: slug }, ctx);
 				const aggDetails = aggregate.details as any;
 
+				emitNightshiftEvent(pi, "review-plan.cycle", { spec: currentSpec!, iteration: reviewIter + 1, approved: !!aggDetails?.all_passed });
 				if (aggDetails?.all_passed) {
 					planApproved = true;
 					emitProgress("review-plan", "Plan approved by all reviewers");
@@ -462,6 +472,7 @@ async function startNightshift(
 			);
 			emitChildLinked(pi, workerResult, currentSpec, "implement");
 
+			emitNightshiftEvent(pi, "implement.done", { spec: currentSpec!, exit_code: workerResult.exitCode });
 			if (workerResult.exitCode !== 0) {
 				emitProgress("implement", `Worker failed: ${workerResult.stderr || workerResult.errorMessage}`);
 				specFailed = true;
@@ -475,6 +486,7 @@ async function startNightshift(
 			// Step 1: Run plan-specific tests first (fast feedback)
 			const planTestResult = await runPlanTests({ plan: planPath }, ctx);
 			const planTestDetails = planTestResult.details as any;
+			emitNightshiftEvent(pi, "quality.plan-tests", { spec: currentSpec!, passed: planTestDetails?.passed !== false });
 			if (planTestDetails?.passed === false) {
 				emitProgress("quality-gates", "Plan tests failed — asking worker to fix...");
 				qualityPassed = false;
@@ -504,6 +516,7 @@ async function startNightshift(
 			if (qualityPassed) {
 				const fullResult = await runAllTests({}, ctx);
 				const fullDetails = fullResult.details as any;
+				emitNightshiftEvent(pi, "quality.full-tests", { spec: currentSpec!, passed: fullDetails?.passed !== false });
 				if (fullDetails?.passed === false) {
 					emitProgress("quality-gates", "Full test suite has failures — asking worker to fix...");
 					qualityPassed = false;
@@ -530,12 +543,15 @@ async function startNightshift(
 
 			// Step 3: TypeScript check
 			if (existsSync(path.join(ctx.cwd, "tsconfig.json"))) {
+				let tscPassed = true;
 				try {
 					execSync("npx tsc --noEmit", { cwd: ctx.cwd, encoding: "utf-8", timeout: 120000 });
 				} catch {
 					emitProgress("quality-gates", "TypeScript errors detected");
 					qualityPassed = false;
+					tscPassed = false;
 				}
+				emitNightshiftEvent(pi, "quality.typecheck", { spec: currentSpec!, passed: tscPassed });
 			}
 
 			if (!qualityPassed) {
@@ -579,6 +595,7 @@ async function startNightshift(
 				const aggregate = await aggregateReviews({ target: slug }, ctx);
 				const aggDetails = aggregate.details as any;
 
+				emitNightshiftEvent(pi, "review-impl.cycle", { spec: currentSpec!, iteration: reviewIter + 1, approved: !!aggDetails?.all_passed });
 				if (aggDetails?.all_passed) {
 					implApproved = true;
 					emitProgress("review-impl", "Implementation approved by all reviewers");
@@ -670,12 +687,15 @@ async function startNightshift(
 			}
 
 			// Mark spec as done
+			emitNightshiftEvent(pi, "commit", { spec: currentSpec! });
 			await updateSpecStatus({ spec_path: specDetails.path, status: "done" }, ctx);
 			completed.push(currentSpec!);
+			emitNightshiftEvent(pi, "spec.completed", { spec: currentSpec! });
 
 		} catch (err: any) {
 			if (!specFailed) specFailed = true;
 			failed.push(currentSpec!);
+			emitNightshiftEvent(pi, "spec.blocked", { spec: currentSpec!, reason: err.message });
 			// Mark spec as blocked — prevents re-picking in this session
 			// Human reviews the report, investigates, and sets back to "ready" after fixing
 			try {
@@ -701,6 +721,7 @@ async function startNightshift(
 		commitCount = logOutput.trim().split("\n").filter(Boolean).length;
 	} catch { /* ignore */ }
 
+	emitNightshiftEvent(pi, "done", { completed, failed, branch: branchName, commits: commitCount });
 	currentState = "done";
 	await saveCheckpoint(ctx.cwd, {
 		state: "done",

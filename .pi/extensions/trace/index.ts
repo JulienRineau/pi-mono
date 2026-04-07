@@ -13,7 +13,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { addTags, buildSummary, buildTree, cleanupTraces, computeStats, filterChildren, listTraces, readTrace, repairTraces, setTitle } from "./analyzer.js";
+import { addTags, buildTree, cleanupTraces, computeStats, listTraces, readTrace, repairTraces, setTitle } from "./analyzer.js";
 import type { TraceState } from "./types.js";
 import {
 	appendEvent,
@@ -135,6 +135,14 @@ export default function (pi: ExtensionAPI): void {
 		appendEvent(state, "child.linked", { child_session, agent, context });
 	});
 
+	// ── EventBus: nightshift state machine events ───────────────
+
+	pi.events.on("trace.nightshift", (data: unknown) => {
+		if (!state) return;
+		const { event, ...rest } = data as { event: string } & Record<string, unknown>;
+		appendEvent(state, `nightshift.${event}`, rest);
+	});
+
 	// ── Trace Tool Registration ─────────────────────────────────
 
 	registerTraceTool(pi);
@@ -153,8 +161,6 @@ function registerTraceTool(pi: ExtensionAPI): void {
 			Type.Literal("read"),
 			Type.Literal("tree"),
 			Type.Literal("stats"),
-			Type.Literal("summary"),
-			Type.Literal("filter"),
 			Type.Literal("tag"),
 			Type.Literal("title"),
 			Type.Literal("cleanup"),
@@ -167,9 +173,7 @@ function registerTraceTool(pi: ExtensionAPI): void {
 		tags: Type.Optional(Type.Array(Type.String(), { description: "Tags to add (tag action) or filter by (list)" })),
 		parent: Type.Optional(Type.String({ description: "Parent session filter for list" })),
 		project: Type.Optional(Type.String({ description: "Filter by project directory (cwd substring match)" })),
-		phase: Type.Optional(Type.String({ description: "Phase filter for filter action (substring match)" })),
-		spec: Type.Optional(Type.String({ description: "Spec name filter for filter action (substring match)" })),
-		event_type: Type.Optional(Type.String({ description: "Event type filter for read action (e.g. 'tool.end')" })),
+		event_type: Type.Optional(Type.String({ description: "Event type filter for read action (e.g. 'tool.end', 'nightshift.spec.picked')" })),
 		title: Type.Optional(Type.String({ description: "New title for title action" })),
 		keep: Type.Optional(Type.Integer({ description: "Number of sessions to keep for cleanup (default 50)" })),
 	});
@@ -180,8 +184,7 @@ function registerTraceTool(pi: ExtensionAPI): void {
 		description:
 			"Query and manage PI execution traces. " +
 			"Actions: list (recent traces), read (event stream, filterable by event_type), tree (parent→child hierarchy), " +
-			"stats (tool call frequency/duration), summary (nightshift run overview by spec/phase), " +
-			"filter (find child sessions by phase/spec), tag (add tags), title (set title), " +
+			"stats (tool call frequency/duration), tag (add tags), title (set title), " +
 			"cleanup (retention), repair (fix incomplete traces).",
 		parameters: TraceParams,
 
@@ -269,75 +272,6 @@ function registerTraceTool(pi: ExtensionAPI): void {
 					return textResult(lines.join("\n"));
 				}
 
-				case "summary": {
-					if (!params.session_id) {
-						return textResult("Error: session_id required for summary");
-					}
-					const summary = buildSummary(tracesDir, params.session_id);
-					if (!summary) {
-						return textResult(`No trace found for session ${params.session_id}`);
-					}
-
-					const lines: string[] = [];
-					const dur = summary.duration_ms > 0 ? `${Math.round(summary.duration_ms / 1000)}s` : "?";
-					lines.push(`Run: ${summary.session_id.slice(0, 8)} | ${summary.title} | ${dur} | ${summary.specs.length} specs`);
-					lines.push("");
-
-					const completed = summary.specs.filter((s) => s.outcome === "completed");
-					const blocked = summary.specs.filter((s) => s.outcome === "blocked");
-
-					if (completed.length > 0) {
-						lines.push(`Completed (${completed.length}):`);
-						for (const spec of completed) {
-							const pipeline = spec.phases.map((p) => {
-								const d = p.duration_ms > 0 ? `${Math.round(p.duration_ms / 1000)}s` : "?";
-								const mark = p.outcome === "error" ? "✗" : "✓";
-								return `${p.phase}(${d})${mark}`;
-							}).join(" → ");
-							lines.push(`  ${spec.spec} — ${pipeline}`);
-						}
-						lines.push("");
-					}
-
-					if (blocked.length > 0) {
-						lines.push(`Blocked (${blocked.length}):`);
-						for (const spec of blocked) {
-							const pipeline = spec.phases.map((p) => {
-								const d = p.duration_ms > 0 ? `${Math.round(p.duration_ms / 1000)}s` : "?";
-								const mark = p.outcome === "error" ? "✗" : "✓";
-								return `${p.phase}(${d})${mark}`;
-							}).join(" → ");
-							lines.push(`  ${spec.spec} — ${pipeline}`);
-						}
-						lines.push("");
-					}
-
-					lines.push(`Totals: ${formatTokens(summary.totals.tokens_in)}↑ ${formatTokens(summary.totals.tokens_out)}↓ ${summary.totals.tool_calls} tool calls`);
-					return textResult(lines.join("\n"));
-				}
-
-				case "filter": {
-					if (!params.session_id) {
-						return textResult("Error: session_id required for filter");
-					}
-					if (!params.phase && !params.spec) {
-						return textResult("Error: at least one of phase or spec required for filter");
-					}
-					const children = filterChildren(tracesDir, params.session_id, {
-						phase: params.phase,
-						spec: params.spec,
-					});
-					if (children.length === 0) {
-						return textResult("No matching child sessions found.");
-					}
-					const lines = children.map((c) => {
-						const dur = c.duration_ms > 0 ? `${Math.round(c.duration_ms / 1000)}s` : "?";
-						const tokens = `${formatTokens(c.tokens.in)}↑ ${formatTokens(c.tokens.out)}↓`;
-						return `- ${c.session_id.slice(0, 8)} | ${c.spec} | ${c.phase} | ${c.agent} | ${c.outcome} | ${dur} | ${c.tool_calls} tools | ${tokens}`;
-					});
-					return textResult(`Matching sessions (${children.length}):\n\n${lines.join("\n")}`);
-				}
-
 				case "tag": {
 					if (!params.session_id || !params.tags?.length) {
 						return textResult("Error: session_id and tags required");
@@ -375,8 +309,6 @@ function registerTraceTool(pi: ExtensionAPI): void {
 			if (args.session_id) text += ` ${String(args.session_id).slice(0, 8)}`;
 			if (args.since) text += ` since:${args.since}`;
 			if (args.agent) text += ` agent:${args.agent}`;
-			if (args.phase) text += ` phase:${args.phase}`;
-			if (args.spec) text += ` spec:${args.spec}`;
 			if (args.event_type) text += ` type:${args.event_type}`;
 			return new Text(text, 0, 0);
 		},
