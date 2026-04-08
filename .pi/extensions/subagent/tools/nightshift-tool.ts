@@ -577,6 +577,13 @@ async function startNightshift(
 		}
 
 		currentSpec = specDetails.filename || path.basename(specDetails.path);
+
+		// Validate spec status — guard against stale git state restoring done/blocked specs as ready
+		if (specDetails.status && specDetails.status !== "ready") {
+			updatePhase(`Skipping ${currentSpec}: status is "${specDetails.status}", not "ready"`);
+			continue;
+		}
+
 		updatePhase(`Selected: ${currentSpec}`);
 
 		// Read full spec content
@@ -1342,6 +1349,14 @@ async function startNightshift(
 		);
 	}
 
+	// Close any running phase in the timeline
+	const lastRunning = timeline.find((e) => e.status === "running");
+	if (lastRunning) {
+		lastRunning.status = "done";
+		lastRunning.endedAt = Date.now();
+		lastRunning.durationMs = Date.now() - lastRunning.startedAt;
+	}
+
 	return {
 		content: [{ type: "text", text: resultLines.join("\n") }],
 		details: {
@@ -1349,6 +1364,9 @@ async function startNightshift(
 			completed: completed.length,
 			failed: failed.length,
 			maxSpecs,
+			currentSpec,
+			elapsed: `${Math.round((Date.now() - new Date(startedAt).getTime()) / 60000)}min`,
+			timeline: [...timeline],
 		},
 	};
 }
@@ -1517,7 +1535,15 @@ export function registerNightshiftTool(pi: ExtensionAPI): void {
 					}
 				}
 
-				if (details.completed > 0 || details.failed > 0) {
+				if (isDone) {
+					lines.push("");
+					if (details.failed > 0) {
+						lines.push(theme.fg("error", `  ✗ ${details.failed} spec(s) failed — blocked, awaiting instructions`));
+					}
+					if (details.completed > 0) {
+						lines.push(theme.fg("success", `  ✓ ${details.completed} spec(s) completed`));
+					}
+				} else if (details.completed > 0 || details.failed > 0) {
 					lines.push(theme.fg("muted", `  Progress: ${details.completed}/${details.maxSpecs} specs`));
 				}
 
