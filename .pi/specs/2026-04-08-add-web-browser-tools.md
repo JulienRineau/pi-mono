@@ -2,7 +2,7 @@
 title: Add web browser tools for autonomous web research
 type: feature
 priority: high
-status: ready
+status: done
 created: 2026-04-07
 ---
 
