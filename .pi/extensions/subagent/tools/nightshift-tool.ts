@@ -285,6 +285,16 @@ async function normalizeAllReviewFilenames(
 }
 
 /**
+ * Find which reviewers didn't produce a review file. Returns agent names missing files.
+ */
+async function findMissingReviewers(runDir: string, targetSlug: string, agentNames: string[]): Promise<string[]> {
+	const reviewsDir = path.join(runDir, "reviews", targetSlug);
+	if (!existsSync(reviewsDir)) return [...agentNames];
+	const files = new Set((await fs.readdir(reviewsDir)).filter((f) => f.endsWith(".md")).map((f) => f.replace(".md", "")));
+	return agentNames.filter((a) => !files.has(a));
+}
+
+/**
  * Detect which workspace packages have changes vs main branch.
  * Used by quality gates to only test modified packages.
  */
@@ -634,8 +644,6 @@ async function startNightshift(
 			}
 
 			// ── PLAN ─────────────────────────────────────────────
-			planVersion++;
-			startPhase("plan", `Plan v${planVersion}`);
 			const plannerTaskParts = [
 				`Create an execution plan for this spec.`,
 				``,
@@ -656,32 +664,44 @@ async function startNightshift(
 			}
 
 			const plannerTask = plannerTaskParts.join("\n");
-
 			const runEnv = { PI_NIGHTSHIFT_RUN_DIR: runDir };
-			const planResult = await runSingleAgent(
-				projectRoot,
-				agents,
-				"planner",
-				plannerTask,
-				undefined,
-				undefined,
-				signal,
-				undefined,
-				makeDetails,
-				runEnv,
-			);
-			emitChildLinked(pi, planResult, currentSpec, "plan");
-			const planOutput = getFinalOutput(planResult.messages);
 
-			if (planResult.exitCode !== 0) {
-				failPhase(`Planner failed: ${planResult.stderr || planResult.errorMessage}`);
-				specFailed = true;
-				throw new Error("Planner failed");
+			// Retry planner up to 3 times if it fails to produce a plan file
+			let planPath: string | null = null;
+			let planOutput = "";
+			const MAX_PLAN_ATTEMPTS = 3;
+			for (let planAttempt = 0; planAttempt < MAX_PLAN_ATTEMPTS; planAttempt++) {
+				planVersion++;
+				startPhase("plan", planAttempt === 0 ? `Plan v${planVersion}` : `Plan v${planVersion} (retry ${planAttempt})`);
+
+				const planResult = await runSingleAgent(
+					projectRoot,
+					agents,
+					"planner",
+					plannerTask,
+					undefined,
+					undefined,
+					signal,
+					undefined,
+					makeDetails,
+					runEnv,
+				);
+				emitChildLinked(pi, planResult, currentSpec, "plan");
+				planOutput = getFinalOutput(planResult.messages);
+
+				if (planResult.exitCode !== 0) {
+					failPhase(`Planner failed: ${planResult.stderr || planResult.errorMessage}`);
+					break; // Don't retry on hard failure
+				}
+
+				planPath = extractPlanPath(planOutput, runDir);
+				if (planPath) break; // Success
+
+				updatePhase(`No plan file produced (attempt ${planAttempt + 1}/${MAX_PLAN_ATTEMPTS})`);
 			}
 
-			let planPath = extractPlanPath(planOutput, runDir);
 			if (!planPath) {
-				failPhase("Could not extract plan path");
+				failPhase("Planner failed to produce a plan file after retries");
 				specFailed = true;
 				throw new Error("No plan path found");
 			}
@@ -749,6 +769,23 @@ async function startNightshift(
 					return result;
 				});
 				await normalizeAllReviewFilenames(runDir, slug, REVIEWER_AGENTS);
+
+				// Retry reviewers that didn't produce a file (max 2 retries)
+				for (let retryRound = 0; retryRound < 2; retryRound++) {
+					const missing = await findMissingReviewers(runDir, slug, REVIEWER_AGENTS);
+					if (missing.length === 0) break;
+					updatePhase(`Retrying ${missing.length} reviewer(s): ${missing.join(", ")}`);
+					const retryTasks = missing.map((reviewer) => reviewTasks.find((t) => t.agent === reviewer)!).filter(Boolean);
+					await mapWithConcurrencyLimit(retryTasks, MAX_CONCURRENCY, async (task) => {
+						const result = await runSingleAgent(
+							projectRoot, agents, task.agent, task.task,
+							undefined, undefined, signal, undefined, makeDetails, runEnv,
+						);
+						emitChildLinked(pi, result, currentSpec, "review-plan");
+						return result;
+					});
+					await normalizeAllReviewFilenames(runDir, slug, REVIEWER_AGENTS);
+				}
 
 				// Aggregate reviews
 				const aggregate = await aggregateReviews({ target: slug }, ctx, runDir);
@@ -846,7 +883,7 @@ async function startNightshift(
 			// ── IMPLEMENT ────────────────────────────────────────
 			startPhase("implement", "Implement");
 			const absPlanPath = path.join(runDir, planPath);
-			const workerTasks: TaskStatus[] = [];
+			const workerTaskMap = new Map<string, TaskStatus>();
 
 			const workerOnUpdate: OnUpdateCallback = (partial) => {
 				// Extract todo_write tool calls from streamed messages
@@ -859,27 +896,26 @@ async function startNightshift(
 						if (part.type === "toolCall" && part.name === "todo_write") {
 							const args = part.arguments as Record<string, unknown>;
 							if (args.action === "init" && Array.isArray(args.tasks)) {
-								workerTasks.length = 0;
+								// Add/update but never remove — preserves tasks across milestone re-inits
 								for (const t of args.tasks as Array<{ id?: string; description?: string; status?: string }>) {
-									workerTasks.push({
-										id: t.id || "",
+									const id = t.id || "";
+									workerTaskMap.set(id, {
+										id,
 										description: t.description || "",
 										status: (t.status as TaskStatus["status"]) || "pending",
 									});
 								}
 							} else if (args.action === "update" && args.id) {
-								const task = workerTasks.find((t) => t.id === args.id);
-								if (task && args.status) {
-									task.status = args.status as TaskStatus["status"];
-								}
-								if (task && args.description) {
-									task.description = args.description as string;
+								const task = workerTaskMap.get(args.id as string);
+								if (task) {
+									if (args.status) task.status = args.status as TaskStatus["status"];
+									if (args.description) task.description = args.description as string;
 								}
 							}
 						}
 					}
 				}
-				updatePhase(null, { tasks: [...workerTasks] });
+				updatePhase(null, { tasks: Array.from(workerTaskMap.values()) });
 			};
 
 			const workerResult = await runSingleAgent(
@@ -1052,6 +1088,23 @@ async function startNightshift(
 				});
 				await normalizeAllReviewFilenames(runDir, slug, REVIEWER_AGENTS);
 
+				// Retry reviewers that didn't produce a file (max 2 retries)
+				for (let retryRound = 0; retryRound < 2; retryRound++) {
+					const missing = await findMissingReviewers(runDir, slug, REVIEWER_AGENTS);
+					if (missing.length === 0) break;
+					updatePhase(`Retrying ${missing.length} reviewer(s): ${missing.join(", ")}`);
+					const retryTasks = missing.map((reviewer) => reviewTasks.find((t) => t.agent === reviewer)!).filter(Boolean);
+					await mapWithConcurrencyLimit(retryTasks, MAX_CONCURRENCY, async (task) => {
+						const result = await runSingleAgent(
+							projectRoot, agents, task.agent, task.task,
+							undefined, undefined, signal, undefined, makeDetails, runEnv,
+						);
+						emitChildLinked(pi, result, currentSpec, "review-impl");
+						return result;
+					});
+					await normalizeAllReviewFilenames(runDir, slug, REVIEWER_AGENTS);
+				}
+
 				const aggregate = await aggregateReviews({ target: slug }, ctx, runDir);
 				const aggDetails = aggregate.details as any;
 
@@ -1096,33 +1149,36 @@ async function startNightshift(
 				}
 			}
 
-			// ── CHANGELOG ────────────────────────────────────────
-			if (existsSync(path.join(projectRoot, "CHANGELOG.md"))) {
-				startPhase("changelog", "Changelog");
-				const changelogResult = await runSingleAgent(
-					projectRoot,
-					agents,
-					"worker",
-					[
-						`Add a CHANGELOG.md entry for this completed work.`,
-						`Read the existing CHANGELOG.md to understand the format.`,
-						`Add an entry under the [Unreleased] section (or the topmost section).`,
-						``,
-						`Spec: ${specTitle}`,
-						`Spec type: ${(specDetails as any).type || "feature"}`,
-						`Plan: ${absPlanPath}`,
-						``,
-						`Keep the entry concise — one line per notable change.`,
-						`Follow the existing CHANGELOG format exactly.`,
-					].join("\n"),
-					undefined,
-					undefined,
-					signal,
-					undefined,
-					makeDetails,
-				);
-				emitChildLinked(pi, changelogResult, currentSpec, "changelog");
+			// ── HARNESS CHANGELOG ────────────────────────────────
+			startPhase("changelog", "Harness changelog");
+			const changelogPath = path.join(projectRoot, ".pi", "HARNESS_CHANGELOG.md");
+			let changelogContent = "";
+			try {
+				changelogContent = await fs.readFile(changelogPath, "utf-8");
+			} catch {
+				/* new file */
 			}
+
+			const changelogEntry = [
+				`## ${new Date().toISOString().split("T")[0]} — ${specTitle}`,
+				``,
+				`- Spec: ${currentSpec}`,
+				`- Branch: ${branchName}`,
+				`- Run: ${path.basename(runDir)}`,
+				`- Plan: ${planPath}`,
+				`- Review: ${implApproved ? "approved" : "conditional"}`,
+				``,
+			].join("\n");
+
+			if (changelogContent.startsWith("# Harness Changelog")) {
+				const headerEnd = changelogContent.indexOf("\n\n") + 2;
+				changelogContent = changelogContent.slice(0, headerEnd) + changelogEntry + changelogContent.slice(headerEnd);
+			} else {
+				changelogContent = `# Harness Changelog\n\n${changelogEntry}${changelogContent}`;
+			}
+
+			await fs.writeFile(changelogPath, changelogContent, "utf-8");
+			updatePhase("Updated .pi/HARNESS_CHANGELOG.md");
 
 			// ── COMMIT ───────────────────────────────────────────
 			startPhase("commit", "Commit");
@@ -1264,6 +1320,17 @@ async function startNightshift(
 		`Duration: ${Math.round((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 60000)} minutes`,
 	];
 
+	if (completed.length > 0) {
+		resultLines.push(
+			``,
+			`Completed specs:`,
+			...completed.map((s) => `  ✓ ${s}`),
+			``,
+			`Run directory: .pi/nightshift/${runDir ? path.basename(runDir) : "unknown"}`,
+			`Harness changelog updated: .pi/HARNESS_CHANGELOG.md`,
+		);
+	}
+
 	if (failed.length > 0) {
 		resultLines.push(
 			``,
@@ -1387,23 +1454,23 @@ export function registerNightshiftTool(pi: ExtensionAPI): void {
 				return new Text(`${theme.fg("error", "✗")} ${details.error}`, 0, 0);
 			}
 
-			if (details?.state === "done") {
-				const icon = details.failed > 0 ? theme.fg("warning", "◐") : theme.fg("success", "✓");
-				return new Text(
-					`${icon} Night shift: ${details.completed} completed, ${details.failed} failed`,
-					0,
-					0,
-				);
-			}
-
-			// Live timeline dashboard
+			// Live timeline dashboard (both running and done states)
 			if (details?.timeline && details.timeline.length > 0) {
 				const lines: string[] = [];
 
 				// Header
+				const isDone = details.state === "done";
 				const spec = details.currentSpec ? theme.fg("accent", details.currentSpec) : "";
 				const elapsed = details.elapsed ? theme.fg("muted", ` (${details.elapsed})`) : "";
-				lines.push(`${theme.fg("warning", "⏳")} ${spec}${elapsed}`);
+				if (isDone) {
+					const doneIcon = details.failed > 0 ? theme.fg("warning", "◐") : theme.fg("success", "✓");
+					const summary = details.failed > 0
+						? `${details.completed} completed, ${details.failed} failed`
+						: `${details.completed} completed`;
+					lines.push(`${doneIcon} Night shift: ${summary}${elapsed}`);
+				} else {
+					lines.push(`${theme.fg("warning", "⏳")} ${spec}${elapsed}`);
+				}
 
 				for (const entry of details.timeline) {
 					const icon =
@@ -1444,7 +1511,8 @@ export function registerNightshiftTool(pi: ExtensionAPI): void {
 										: t.status === "cancelled"
 											? theme.fg("muted", "—")
 											: theme.fg("dim", "○");
-							lines.push(`    ${ti} ${t.id} ${t.description}`);
+							const desc = t.description.length > 50 ? `${t.description.slice(0, 47)}...` : t.description;
+							lines.push(`    ${ti} ${t.id} ${desc}`);
 						}
 					}
 				}
