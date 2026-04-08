@@ -1,9 +1,0 @@
-{
-  "state": "pick-spec",
-  "branch": "nightshift/web-browser-tools",
-  "completed": [],
-  "failed": [],
-  "startedAt": "2026-04-07T22:29:41.394Z",
-  "currentSpec": "2026-04-07-add-web-browser-tools.md",
-  "runDir": "/Users/julien/Github/pi-mono-meta/.pi/nightshift/2026-04-07T22-30-45-add-web-browser-tools"
-}
