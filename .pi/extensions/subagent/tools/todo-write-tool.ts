@@ -9,6 +9,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { paramError } from "./validation.js";
 
 // Types
 export type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
@@ -171,7 +172,7 @@ function handleInit(
 	pi: ExtensionAPI,
 ): AgentToolResult<TodoDetails> {
 	if (!params.tasks || !Array.isArray(params.tasks)) {
-		return errorResult("Error: tasks array required for init");
+		return errorResult(paramError("todo_write", "init", ["tasks"], params as Record<string, unknown>));
 	}
 
 	// Clear existing and add new
@@ -200,7 +201,7 @@ function handleUpdate(
 	pi: ExtensionAPI,
 ): AgentToolResult<TodoDetails> {
 	if (!params.id) {
-		return errorResult("Error: task id required");
+		return errorResult(paramError("todo_write", "update", ["id"], params as Record<string, unknown>));
 	}
 
 	const task = store.get(params.id);

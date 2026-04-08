@@ -2,7 +2,6 @@
 name: planner
 description: Creates comprehensive execution plans with milestones, validation criteria, and living document structure
 tools: read, grep, find, ls, questionnaire, plan, spec
-model: claude-sonnet-4-5
 ---
 
 # Planner Agent

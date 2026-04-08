@@ -20,6 +20,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { paramError } from "./validation.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -105,7 +106,9 @@ function detectTestCommand(cwd: string): string | null {
 			if (pkg.scripts?.test && !pkg.scripts.test.includes("no test specified")) {
 				return "npm test";
 			}
-		} catch { /* ignore */ }
+		} catch {
+			/* ignore */
+		}
 	}
 
 	return null;
@@ -130,7 +133,9 @@ function detectTestRunner(cwd: string): "vitest" | "jest" | "mocha" | "unknown" 
 			if (deps.vitest) return "vitest";
 			if (deps.jest) return "jest";
 			if (deps.mocha) return "mocha";
-		} catch { /* ignore */ }
+		} catch {
+			/* ignore */
+		}
 	}
 	return "unknown";
 }
@@ -158,7 +163,7 @@ export async function registerTests(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<TestDetails>> {
 	if (!params.plan || !params.files || params.files.length === 0) {
-		return errorResult("Error: plan and files are required for register");
+		return errorResult(paramError("test", "register", ["plan", "files"], params as Record<string, unknown>));
 	}
 
 	const manifest = await readManifest(ctx);
@@ -190,7 +195,7 @@ export async function runPlanTests(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<TestDetails>> {
 	if (!params.plan) {
-		return errorResult("Error: plan is required for run");
+		return errorResult(paramError("test", "run", ["plan"], params as Record<string, unknown>));
 	}
 
 	const manifest = await readManifest(ctx);
@@ -221,15 +226,25 @@ export async function runPlanTests(
 		}
 		try {
 			const output = execSync(fullCmd, { cwd: ctx.cwd, encoding: "utf-8", timeout: 600000 });
-			manifest[params.plan].lastRun = { passed: true, timestamp: new Date().toISOString(), summary: "Full suite passed" };
+			manifest[params.plan].lastRun = {
+				passed: true,
+				timestamp: new Date().toISOString(),
+				summary: "Full suite passed",
+			};
 			await writeManifest(ctx, manifest);
 			return {
-				content: [{ type: "text", text: `Tests passed (full suite — could not filter by plan)\n${output.slice(-500)}` }],
+				content: [
+					{ type: "text", text: `Tests passed (full suite — could not filter by plan)\n${output.slice(-500)}` },
+				],
 				details: { plan: params.plan, files: existingFiles, passed: true, summary: "Full suite passed" },
 			};
 		} catch (err: any) {
 			const output = (err.stdout || err.stderr || "").toString().slice(-500);
-			manifest[params.plan].lastRun = { passed: false, timestamp: new Date().toISOString(), summary: "Tests failed" };
+			manifest[params.plan].lastRun = {
+				passed: false,
+				timestamp: new Date().toISOString(),
+				summary: "Tests failed",
+			};
 			await writeManifest(ctx, manifest);
 			return {
 				content: [{ type: "text", text: `Tests FAILED (full suite)\n${output}` }],
@@ -240,7 +255,11 @@ export async function runPlanTests(
 
 	try {
 		const output = execSync(filteredCmd, { cwd: ctx.cwd, encoding: "utf-8", timeout: 600000 });
-		manifest[params.plan].lastRun = { passed: true, timestamp: new Date().toISOString(), summary: "All plan tests passed" };
+		manifest[params.plan].lastRun = {
+			passed: true,
+			timestamp: new Date().toISOString(),
+			summary: "All plan tests passed",
+		};
 		await writeManifest(ctx, manifest);
 		return {
 			content: [{ type: "text", text: `Plan tests passed (${existingFiles.length} files)\n${output.slice(-500)}` }],
@@ -257,10 +276,7 @@ export async function runPlanTests(
 	}
 }
 
-export async function runAllTests(
-	_params: any,
-	ctx: ExtensionContext,
-): Promise<AgentToolResult<TestDetails>> {
+export async function runAllTests(_params: any, ctx: ExtensionContext): Promise<AgentToolResult<TestDetails>> {
 	const testCmd = detectTestCommand(ctx.cwd);
 	if (!testCmd) {
 		return errorResult("No test command detected. Set PI_TEST_CMD or add scripts.test to package.json.");
@@ -281,10 +297,7 @@ export async function runAllTests(
 	}
 }
 
-async function listTests(
-	params: { plan?: string },
-	ctx: ExtensionContext,
-): Promise<AgentToolResult<TestDetails>> {
+async function listTests(params: { plan?: string }, ctx: ExtensionContext): Promise<AgentToolResult<TestDetails>> {
 	const manifest = await readManifest(ctx);
 
 	if (params.plan) {
@@ -335,10 +348,7 @@ async function listTests(
 	};
 }
 
-async function testStatus(
-	_params: any,
-	ctx: ExtensionContext,
-): Promise<AgentToolResult<TestDetails>> {
+async function testStatus(_params: any, ctx: ExtensionContext): Promise<AgentToolResult<TestDetails>> {
 	const manifest = await readManifest(ctx);
 	const plans = Object.keys(manifest);
 

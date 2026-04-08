@@ -1,9 +1,9 @@
 /**
  * Trace Extension — Always-on agent observability
  *
- * Automatically captures all tool calls, turns, and agent lifecycle events
- * within any PI process. Each process traces itself via pi.on() hooks.
- * No env vars, no cross-process config.
+ * Directory-per-session, file-per-run storage model.
+ * Each agent run (user message → agent response) gets its own run file
+ * with monotonically increasing sequence numbers across the session.
  *
  * Parent-child linking: the subagent/nightshift tool emits "trace.child.linked"
  * events via pi.events (EventBus). This extension listens and records them.
@@ -13,13 +13,15 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { addTags, buildTree, cleanupTraces, computeStats, listTraces, readTrace, repairTraces, setTitle } from "./analyzer.js";
+import { addTags, buildTree, cleanupTraces, computeStats, listRuns, listTraces, readTrace, repairTraces, setTitle } from "./analyzer.js";
 import type { TraceState } from "./types.js";
 import {
 	appendEvent,
+	endRun,
 	finalizeTrace,
 	getTracesDir,
 	initTrace,
+	startRun,
 	summarizeToolArgs,
 	summarizeToolResult,
 } from "./writer.js";
@@ -35,7 +37,6 @@ export default function (pi: ExtensionAPI): void {
 			const model = ctx.model?.name ?? "unknown";
 			state = initTrace(sessionId, ctx.cwd, model);
 		} catch {
-			// If tracing init fails, disable tracing silently
 			state = null;
 		}
 	});
@@ -46,9 +47,15 @@ export default function (pi: ExtensionAPI): void {
 		}
 	});
 
+	pi.on("agent_start", () => {
+		if (!state) return;
+		startRun(state);
+	});
+
 	pi.on("tool_execution_start", (event: any) => {
 		if (!state) return;
 		state.totalToolCalls++;
+		state.runToolCalls++;
 		state.toolTimers.set(event.toolCallId, {
 			startTime: Date.now(),
 			toolName: event.toolName,
@@ -70,7 +77,10 @@ export default function (pi: ExtensionAPI): void {
 		// Track files modified by write/edit tools
 		if ((event.toolName === "write" || event.toolName === "edit") && !event.isError) {
 			const fp = event.args?.file_path ?? timer?.args?.file_path;
-			if (fp) state.filesModified.add(fp);
+			if (fp) {
+				state.filesModified.add(fp);
+				state.runFilesModified.add(fp);
+			}
 		}
 
 		const summary = summarizeToolResult(event.toolName, event.result);
@@ -86,6 +96,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("turn_start", () => {
 		if (!state) return;
 		state.totalTurns++;
+		state.runTurns++;
 		appendEvent(state, "turn.start", {});
 	});
 
@@ -97,20 +108,14 @@ export default function (pi: ExtensionAPI): void {
 		const outputTokens = usage?.output || 0;
 		state.tokensIn += inputTokens;
 		state.tokensOut += outputTokens;
+		state.runTokensIn += inputTokens;
+		state.runTokensOut += outputTokens;
 		appendEvent(state, "turn.end", { input_tokens: inputTokens, output_tokens: outputTokens });
-	});
-
-	pi.on("agent_start", () => {
-		if (!state) return;
-		appendEvent(state, "agent.start", {});
 	});
 
 	pi.on("agent_end", () => {
 		if (!state) return;
-		appendEvent(state, "agent.end", {
-			total_turns: state.totalTurns,
-			total_tokens: state.tokensIn + state.tokensOut,
-		});
+		endRun(state);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -159,6 +164,7 @@ function registerTraceTool(pi: ExtensionAPI): void {
 		action: Type.Union([
 			Type.Literal("list"),
 			Type.Literal("read"),
+			Type.Literal("runs"),
 			Type.Literal("tree"),
 			Type.Literal("stats"),
 			Type.Literal("tag"),
@@ -166,14 +172,15 @@ function registerTraceTool(pi: ExtensionAPI): void {
 			Type.Literal("cleanup"),
 			Type.Literal("repair"),
 		]),
-		session_id: Type.Optional(Type.String({ description: "Session ID for read/tree/stats/tag/title" })),
+		session_id: Type.Optional(Type.String({ description: "Session ID for read/runs/tree/stats/tag/title" })),
+		run: Type.Optional(Type.Integer({ description: "Run number to read (e.g. 1, 2, 3). Omit to read all runs." })),
 		since: Type.Optional(Type.String({ description: "Time filter for list: '2h', '1d', or ISO date" })),
 		agent: Type.Optional(Type.String({ description: "Agent name filter for list" })),
 		outcome: Type.Optional(Type.String({ description: "Outcome filter for list: success, error, incomplete" })),
 		tags: Type.Optional(Type.Array(Type.String(), { description: "Tags to add (tag action) or filter by (list)" })),
 		parent: Type.Optional(Type.String({ description: "Parent session filter for list" })),
 		project: Type.Optional(Type.String({ description: "Filter by project directory (cwd substring match)" })),
-		event_type: Type.Optional(Type.String({ description: "Event type filter for read action (e.g. 'tool.end', 'nightshift.spec.picked')" })),
+		event_type: Type.Optional(Type.String({ description: "Event type filter for read (e.g. 'tool.end', 'run.start')" })),
 		title: Type.Optional(Type.String({ description: "New title for title action" })),
 		keep: Type.Optional(Type.Integer({ description: "Number of sessions to keep for cleanup (default 50)" })),
 	});
@@ -183,7 +190,9 @@ function registerTraceTool(pi: ExtensionAPI): void {
 		label: "Trace",
 		description:
 			"Query and manage PI execution traces. " +
-			"Actions: list (recent traces), read (event stream, filterable by event_type), tree (parent→child hierarchy), " +
+			"Storage: directory per session, file per run (agent invocation). " +
+			"Actions: list (recent sessions), read (events, filterable by --run and --event_type), " +
+			"runs (list runs within a session), tree (parent→child hierarchy), " +
 			"stats (tool call frequency/duration), tag (add tags), title (set title), " +
 			"cleanup (retention), repair (fix incomplete traces).",
 		parameters: TraceParams,
@@ -209,8 +218,9 @@ function registerTraceTool(pi: ExtensionAPI): void {
 					const lines = entries.map((e) => {
 						const dur = e.duration_ms > 0 ? `${Math.round(e.duration_ms / 1000)}s` : "?";
 						const tokens = `${formatTokens(e.tokens.in)}↑ ${formatTokens(e.tokens.out)}↓`;
-						const tags = e.tags.length > 0 ? ` [${e.tags.join(", ")}]` : "";
-						return `- ${e.session_id.slice(0, 8)} | ${e.title} | ${dur} | ${e.tool_calls} tools | ${tokens}${tags}`;
+						const tags = e.tags?.length > 0 ? ` [${e.tags.join(", ")}]` : "";
+						const runs = e.total_runs ? ` (${e.total_runs} runs)` : "";
+						return `- ${e.session_id.slice(0, 8)} | ${e.title} | ${dur} | ${e.tool_calls} tools | ${tokens}${runs}${tags}`;
 					});
 
 					return textResult(`Traces (${entries.length}):\n\n${lines.join("\n")}`);
@@ -220,9 +230,10 @@ function registerTraceTool(pi: ExtensionAPI): void {
 					if (!params.session_id) {
 						return textResult("Error: session_id required for read");
 					}
-					let events = readTrace(tracesDir, params.session_id);
+					let events = readTrace(tracesDir, params.session_id, params.run);
 					if (events.length === 0) {
-						return textResult(`No trace found for session ${params.session_id}`);
+						const runMsg = params.run ? ` (run ${params.run})` : "";
+						return textResult(`No trace found for session ${params.session_id}${runMsg}`);
 					}
 					if (params.event_type) {
 						events = events.filter((e) => e.type === params.event_type);
@@ -232,6 +243,21 @@ function registerTraceTool(pi: ExtensionAPI): void {
 					}
 					const text = events.map((e) => JSON.stringify(e)).join("\n");
 					return textResult(text);
+				}
+
+				case "runs": {
+					if (!params.session_id) {
+						return textResult("Error: session_id required for runs");
+					}
+					const runs = listRuns(tracesDir, params.session_id);
+					if (runs.length === 0) {
+						return textResult(`No runs found for session ${params.session_id}`);
+					}
+					const lines = runs.map((r) => {
+						const err = r.has_error ? " ⚠ has errors" : "";
+						return `- run ${r.run}: ${r.events} events${err}`;
+					});
+					return textResult(`Runs (${runs.length}):\n\n${lines.join("\n")}`);
 				}
 
 				case "tree": {
@@ -250,12 +276,13 @@ function registerTraceTool(pi: ExtensionAPI): void {
 					if (!params.session_id) {
 						return textResult("Error: session_id required for stats");
 					}
-					const events = readTrace(tracesDir, params.session_id);
+					const events = readTrace(tracesDir, params.session_id, params.run);
 					if (events.length === 0) {
 						return textResult(`No trace found for session ${params.session_id}`);
 					}
 					const stats = computeStats(events);
 					const lines: string[] = [];
+					if (stats.runs > 0) lines.push(`Runs: ${stats.runs}`);
 					lines.push(`Turns: ${stats.turns}`);
 					lines.push(`Tokens: ${formatTokens(stats.tokens.in)} in, ${formatTokens(stats.tokens.out)} out`);
 					lines.push(
@@ -307,6 +334,7 @@ function registerTraceTool(pi: ExtensionAPI): void {
 		renderCall(args, _theme, _context) {
 			let text = `trace ${args.action || "..."}`;
 			if (args.session_id) text += ` ${String(args.session_id).slice(0, 8)}`;
+			if (args.run) text += ` run:${args.run}`;
 			if (args.since) text += ` since:${args.since}`;
 			if (args.agent) text += ` agent:${args.agent}`;
 			if (args.event_type) text += ` type:${args.event_type}`;
@@ -317,7 +345,6 @@ function registerTraceTool(pi: ExtensionAPI): void {
 			const text = result.content[0];
 			if (!text || text.type !== "text") return new Text("", 0, 0);
 
-			// Colorize based on content
 			if (text.text.startsWith("Error:")) {
 				return new Text(theme.fg("error", text.text), 0, 0);
 			}

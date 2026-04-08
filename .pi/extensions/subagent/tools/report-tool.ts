@@ -13,6 +13,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { getArtifactBaseDir, paramError } from "./validation.js";
 
 // Types
 export interface ReportDetails {
@@ -109,12 +110,18 @@ function errorResult(error: string): AgentToolResult<ReportDetails> {
 }
 
 function findValidateScript(ctx: ExtensionContext): string | null {
-	const candidates = [
-		path.join(ctx.cwd, ".pi/extensions/subagent/scripts/validate-report.sh"),
-		path.join(ctx.cwd, "scripts/validate-report.sh"),
-	];
-	for (const c of candidates) {
-		if (existsSync(c)) return c;
+	const searchRoots = [ctx.cwd];
+	const piIdx = ctx.cwd.indexOf("/.pi/nightshift/");
+	if (piIdx !== -1) searchRoots.push(ctx.cwd.slice(0, piIdx));
+
+	for (const root of searchRoots) {
+		const candidates = [
+			path.join(root, ".pi/extensions/subagent/scripts/validate-report.sh"),
+			path.join(root, "scripts/validate-report.sh"),
+		];
+		for (const c of candidates) {
+			if (existsSync(c)) return c;
+		}
 	}
 	return null;
 }
@@ -139,12 +146,13 @@ function extractFrontmatterField(content: string, field: string): string | undef
 export async function saveReport(
 	params: { content?: string },
 	ctx: ExtensionContext,
+	basePath?: string,
 ): Promise<AgentToolResult<ReportDetails>> {
 	if (!params.content) {
-		return errorResult("Error: content is required for save");
+		return errorResult(paramError("report", "save", ["content"], params as Record<string, unknown>));
 	}
 
-	const reportsDir = path.join(ctx.cwd, "reports");
+	const reportsDir = path.join(basePath ?? getArtifactBaseDir(ctx.cwd), "reports");
 
 	// Ensure reports directory exists
 	await fs.mkdir(reportsDir, { recursive: true });
@@ -182,12 +190,10 @@ async function readReport(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<ReportDetails>> {
 	if (!params.report_path) {
-		return errorResult("Error: report_path is required");
+		return errorResult(paramError("report", "read", ["report_path"], params as Record<string, unknown>));
 	}
 
-	const filepath = path.isAbsolute(params.report_path)
-		? params.report_path
-		: path.join(ctx.cwd, params.report_path);
+	const filepath = path.isAbsolute(params.report_path) ? params.report_path : path.join(ctx.cwd, params.report_path);
 
 	if (!existsSync(filepath)) {
 		return errorResult(`Report not found: ${params.report_path}`);
@@ -209,11 +215,8 @@ async function readReport(
 	};
 }
 
-async function listReports(
-	_params: any,
-	ctx: ExtensionContext,
-): Promise<AgentToolResult<ReportDetails>> {
-	const reportsDir = path.join(ctx.cwd, "reports");
+async function listReports(_params: any, ctx: ExtensionContext): Promise<AgentToolResult<ReportDetails>> {
+	const reportsDir = path.join(getArtifactBaseDir(ctx.cwd), "reports");
 
 	if (!existsSync(reportsDir)) {
 		return {

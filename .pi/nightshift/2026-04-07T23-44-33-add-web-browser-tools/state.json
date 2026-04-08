@@ -1,0 +1,10 @@
+{
+  "state": "done",
+  "branch": "nightshift/web-browser-tools",
+  "completed": [],
+  "failed": [
+    "2026-04-07-add-web-browser-tools.md"
+  ],
+  "startedAt": "2026-04-07T23:44:01.722Z",
+  "runDir": "/Users/julien/Github/pi-mono-meta/.pi/nightshift/2026-04-07T23-44-33-add-web-browser-tools"
+}
