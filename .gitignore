@@ -36,4 +36,7 @@ packages/coding-agent/binaries/
 todo.md
 plans/
 .pi/hf-sessions/
+.pi/nightshift/
+.pi/specs/
+.pi/HARNESS_CHANGELOG.md
 collect.sh
