@@ -14,6 +14,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { paramError } from "./validation.js";
 
 // Types
 export type SpecType = "bug" | "feature" | "refactor";
@@ -54,9 +55,7 @@ const SpecParams = Type.Object({
 	content: Type.Optional(Type.String({ description: "Spec markdown content with YAML frontmatter" })),
 
 	// For update-status
-	status: Type.Optional(
-		Type.String({ description: "Spec status: draft, ready, in-progress, done, archived" }),
-	),
+	status: Type.Optional(Type.String({ description: "Spec status: draft, ready, in-progress, done, archived" })),
 
 	// For read, update-status
 	spec_path: Type.Optional(Type.String({ description: "Spec file path to read or update" })),
@@ -66,6 +65,9 @@ const SpecParams = Type.Object({
 });
 
 export type SpecParams = typeof SpecParams.static;
+
+// All known param names (for hint generation across actions)
+const ALL_PARAMS = ["spec_name", "content", "status", "spec_path", "filter_status"];
 
 // Priority sort order (lower index = higher priority)
 const PRIORITY_ORDER: Record<string, number> = {
@@ -149,9 +151,7 @@ export function registerSpecTool(pi: ExtensionAPI): void {
 			if (details.status) meta.push(details.status);
 			const metaStr = meta.length > 0 ? ` (${meta.join(", ")})` : "";
 
-			lines.push(
-				`${theme.fg("success", "✓")} ${theme.fg("accent", details.filename)}${theme.fg("muted", metaStr)}`,
-			);
+			lines.push(`${theme.fg("success", "✓")} ${theme.fg("accent", details.filename)}${theme.fg("muted", metaStr)}`);
 
 			if (text?.type === "text") {
 				lines.push("");
@@ -202,10 +202,10 @@ export async function saveSpec(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<SpecDetails>> {
 	if (!params.spec_name || !params.content) {
-		return errorResult("Error: spec_name and content are required for save");
+		return errorResult(paramError("spec", "save", ["spec_name", "content"], params, ALL_PARAMS));
 	}
 
-	const specsDir = path.join(ctx.cwd, "specs");
+	const specsDir = path.join(ctx.cwd, ".pi", "specs");
 
 	// Run validation gate before writing
 	const validateScript = findValidateScript(ctx.cwd);
@@ -259,7 +259,7 @@ export async function readSpec(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<SpecDetails>> {
 	if (!params.spec_path) {
-		return errorResult("Error: spec_path is required");
+		return errorResult(paramError("spec", "read", ["spec_path"], params, ALL_PARAMS));
 	}
 
 	const filepath = path.isAbsolute(params.spec_path) ? params.spec_path : path.join(ctx.cwd, params.spec_path);
@@ -291,7 +291,7 @@ export async function listSpecs(
 	params: { filter_status?: string },
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<SpecDetails>> {
-	const specsDir = path.join(ctx.cwd, "specs");
+	const specsDir = path.join(ctx.cwd, ".pi", "specs");
 
 	if (!existsSync(specsDir)) {
 		return {
@@ -323,9 +323,7 @@ export async function listSpecs(
 	}
 
 	// Filter by status if requested
-	const filtered = params.filter_status
-		? specs.filter((s) => s.fm.status === params.filter_status)
-		: specs;
+	const filtered = params.filter_status ? specs.filter((s) => s.fm.status === params.filter_status) : specs;
 
 	// Sort: bugs first, then by priority
 	filtered.sort((a, b) => {
@@ -342,7 +340,7 @@ export async function listSpecs(
 
 	const list = filtered
 		.map((s) => {
-			const parts: string[] = [`- ${s.filename}`];
+			const parts: string[] = [`- .pi/specs/${s.filename}`];
 			if (s.fm.title) parts.push(`"${s.fm.title}"`);
 			const meta: string[] = [];
 			if (s.fm.type) meta.push(s.fm.type);
@@ -364,7 +362,7 @@ export async function updateSpecStatus(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<SpecDetails>> {
 	if (!params.spec_path || !params.status) {
-		return errorResult("Error: spec_path and status are required");
+		return errorResult(paramError("spec", "update-status", ["spec_path", "status"], params, ALL_PARAMS));
 	}
 
 	const filepath = path.isAbsolute(params.spec_path) ? params.spec_path : path.join(ctx.cwd, params.spec_path);
@@ -414,12 +412,12 @@ export async function pickNextSpec(
 	_params: Record<string, unknown>,
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<SpecDetails>> {
-	const specsDir = path.join(ctx.cwd, "specs");
+	const specsDir = path.join(ctx.cwd, ".pi", "specs");
 
 	if (!existsSync(specsDir)) {
 		return {
 			content: [{ type: "text", text: "No specs directory exists. Queue is empty." }],
-			details: { path: specsDir, filename: "" },
+			details: { path: "", filename: "" },
 		};
 	}
 
@@ -444,7 +442,7 @@ export async function pickNextSpec(
 	if (readySpecs.length === 0) {
 		return {
 			content: [{ type: "text", text: "No specs with status 'ready'. Queue is empty." }],
-			details: { path: specsDir, filename: "" },
+			details: { path: "", filename: "" },
 		};
 	}
 

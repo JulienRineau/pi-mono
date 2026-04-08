@@ -48,7 +48,9 @@ export interface SubagentDetails {
 	results: SingleResult[];
 }
 
-export type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
+export type DisplayItem =
+	| { type: "text"; text: string }
+	| { type: "toolCall"; name: string; args: Record<string, any> };
 
 export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
@@ -110,7 +112,10 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 	return results;
 }
 
-export async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
+export async function writePromptToTempFile(
+	agentName: string,
+	prompt: string,
+): Promise<{ dir: string; filePath: string }> {
 	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
@@ -157,6 +162,7 @@ export async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	extraEnv?: Record<string, string>,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -225,14 +231,11 @@ export async function runSingleAgent(
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
-			console.error(`[subagent-debug] command: ${invocation.command} ${invocation.args.join(" ")}`);
-			console.error(`[subagent-debug] cwd: ${cwd ?? defaultCwd}`);
-			console.error(`[subagent-debug] process.execPath: ${process.execPath}`);
-			console.error(`[subagent-debug] process.argv: ${JSON.stringify(process.argv)}`);
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				env: extraEnv ? { ...process.env, ...extraEnv } : undefined,
 			});
 			let buffer = "";
 

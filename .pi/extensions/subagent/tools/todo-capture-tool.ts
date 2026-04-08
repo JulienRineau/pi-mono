@@ -12,6 +12,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { paramError } from "./validation.js";
 
 // Types
 export interface TodoCaptureDetails {
@@ -25,9 +26,7 @@ const TodoCaptureParams = Type.Object({
 	action: Type.Union([Type.Literal("append"), Type.Literal("list"), Type.Literal("resolve")]),
 
 	// For append
-	category: Type.Optional(
-		Type.String({ description: "Category: bug, tech-debt, performance, security, idea" }),
-	),
+	category: Type.Optional(Type.String({ description: "Category: bug, tech-debt, performance, security, idea" })),
 	file: Type.Optional(Type.String({ description: "File path related to the observation" })),
 	description: Type.Optional(Type.String({ description: "Description of the observation" })),
 	source: Type.Optional(Type.String({ description: "Which spec or task discovered this" })),
@@ -96,9 +95,7 @@ export function registerTodoCaptureTool(pi: ExtensionAPI): void {
 			}
 
 			const lines: string[] = [];
-			lines.push(
-				`${theme.fg("success", "✓")} ${theme.fg("accent", `${details.count} unresolved`)}`,
-			);
+			lines.push(`${theme.fg("success", "✓")} ${theme.fg("accent", `${details.count} unresolved`)}`);
 
 			if (text?.type === "text") {
 				lines.push("");
@@ -154,7 +151,7 @@ async function appendTodo(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<TodoCaptureDetails>> {
 	if (!params.description) {
-		return errorResult("Error: description is required for append");
+		return errorResult(paramError("todo-capture", "append", ["description"], params as Record<string, unknown>));
 	}
 
 	const category = params.category || "idea";
@@ -196,10 +193,7 @@ async function appendTodo(
 	};
 }
 
-async function listTodos(
-	_params: any,
-	ctx: ExtensionContext,
-): Promise<AgentToolResult<TodoCaptureDetails>> {
+async function listTodos(_params: any, ctx: ExtensionContext): Promise<AgentToolResult<TodoCaptureDetails>> {
 	const todosPath = getTodosPath(ctx);
 
 	if (!existsSync(todosPath)) {
@@ -223,7 +217,7 @@ async function resolveTodo(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<TodoCaptureDetails>> {
 	if (!params.todo_id || params.todo_id < 1) {
-		return errorResult("Error: todo_id (1-based) is required for resolve");
+		return errorResult(paramError("todo-capture", "resolve", ["todo_id"], params as Record<string, unknown>));
 	}
 
 	const todosPath = getTodosPath(ctx);
@@ -274,9 +268,7 @@ async function resolveTodo(
 	}
 
 	if (targetLineIndex === -1) {
-		return errorResult(
-			`Error: todo_id ${params.todo_id} not found (${unresolvedItemIndex} unresolved items exist)`,
-		);
+		return errorResult(`Error: todo_id ${params.todo_id} not found (${unresolvedItemIndex} unresolved items exist)`);
 	}
 
 	// Remove from unresolved section
