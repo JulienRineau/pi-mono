@@ -16,17 +16,23 @@ import type { IndexEntry, SessionMeta, TraceEvent, TraceState } from "./types.js
 
 // ── Directory & Path Helpers ──────────────────────────────────
 
+/** Project-local cwd, set by initTrace from session_start context */
+let _projectCwd: string | null = null;
+
+export function setProjectCwd(cwd: string): void {
+	_projectCwd = cwd;
+}
+
 export function getTracesDir(): string {
-	const envDir = process.env.PI_CODING_AGENT_DIR;
-	let agentDir: string;
-	if (envDir) {
-		if (envDir === "~") agentDir = homedir();
-		else if (envDir.startsWith("~/")) agentDir = homedir() + envDir.slice(1);
-		else agentDir = envDir;
-	} else {
-		agentDir = path.join(homedir(), ".pi", "agent");
+	if (_projectCwd) {
+		const dir = path.join(_projectCwd, ".pi", "traces");
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true });
+		}
+		return dir;
 	}
-	const dir = path.join(agentDir, "traces");
+	// Fallback: global location (should not happen in practice)
+	const dir = path.join(homedir(), ".pi", "agent", "traces");
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true });
 	}
@@ -108,6 +114,7 @@ export function readMetaJson(sessionDir: string): SessionMeta | null {
  * Called once per session (not per run).
  */
 export function initTrace(sessionId: string, cwd: string, model: string): TraceState {
+	setProjectCwd(cwd);
 	const tracesDir = getTracesDir();
 	const sessionDir = getSessionDir(tracesDir, sessionId);
 
