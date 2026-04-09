@@ -54,6 +54,39 @@ export type DisplayItem =
 
 export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+// ── Extensions guard ──────────────────────────────────────────────
+
+/** Snapshot files in .pi/extensions/ (top-level only) */
+function snapshotExtensionsDir(cwd: string): Set<string> {
+	const extDir = path.join(cwd, ".pi", "extensions");
+	try {
+		return new Set(fs.readdirSync(extDir));
+	} catch {
+		return new Set();
+	}
+}
+
+/** Remove any new files a subagent created in .pi/extensions/ */
+function cleanupRogueExtensionFiles(cwd: string, before: Set<string>): string[] {
+	const extDir = path.join(cwd, ".pi", "extensions");
+	const removed: string[] = [];
+	try {
+		for (const entry of fs.readdirSync(extDir)) {
+			if (!before.has(entry)) {
+				const full = path.join(extDir, entry);
+				const stat = fs.statSync(full, { throwIfNoEntry: false });
+				if (stat?.isFile()) {
+					fs.unlinkSync(full);
+					removed.push(entry);
+				}
+			}
+		}
+	} catch {
+		/* extensions dir may not exist */
+	}
+	return removed;
+}
+
 // ── Constants ──────────────────────────────────────────────────────
 
 // System prompt instruction for subagent
@@ -216,6 +249,9 @@ export async function runSingleAgent(
 		}
 	};
 
+	// Snapshot .pi/extensions/ to detect rogue files
+	const extensionsBefore = snapshotExtensionsDir(cwd ?? defaultCwd);
+
 	try {
 		// Add subagent instruction
 		const systemPrompt = agent.systemPrompt.trim() + SUBAGENT_INSTRUCTION;
@@ -320,6 +356,9 @@ export async function runSingleAgent(
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
+		// Remove any files the subagent created in .pi/extensions/
+		cleanupRogueExtensionFiles(cwd ?? defaultCwd, extensionsBefore);
+
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
