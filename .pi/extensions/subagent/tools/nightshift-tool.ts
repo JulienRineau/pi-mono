@@ -35,6 +35,20 @@ import { aggregateReviews } from "./review-tool.js";
 import { pickNextSpec, readSpec, updateSpecStatus } from "./spec-tool.js";
 import { runAllTests, runPlanTests } from "./test-tool.js";
 
+// ── Error logging ─────────────────────────────────────────────────
+
+async function appendErrorLog(runDir: string, phase: string, agent: string, result: SingleResult): Promise<void> {
+	const logPath = path.join(runDir, "errors.log");
+	const timestamp = new Date().toISOString();
+	const lines = [
+		`\n[${timestamp}] ${phase} — agent: ${agent}, exit: ${result.exitCode}`,
+		result.stderr ? `  stderr: ${result.stderr.slice(0, 2000)}` : "",
+		result.errorMessage ? `  errorMessage: ${result.errorMessage}` : "",
+		result.stopReason ? `  stopReason: ${result.stopReason}` : "",
+	].filter(Boolean);
+	await fs.appendFile(logPath, lines.join("\n") + "\n", "utf-8");
+}
+
 // ── Types ──────────────────────────────────────────────────────────
 
 type NightshiftState =
@@ -621,6 +635,7 @@ async function startNightshift(
 			const scoutContext = getFinalOutput(scoutResult.messages);
 
 			if (scoutResult.exitCode !== 0) {
+				await appendErrorLog(runDir, "scout", "scout", scoutResult);
 				failPhase(`Scout failed: ${scoutResult.stderr || scoutResult.errorMessage}`);
 				specFailed = true;
 				throw new Error("Scout failed");
@@ -632,7 +647,7 @@ async function startNightshift(
 				projectRoot,
 				agents,
 				"tester",
-				`Write tests for this spec BEFORE implementation (TDD). Tests define what "done" looks like.\n\n## Spec\n${specContent}\n\n## Codebase Context (from scout)\n${scoutContext}`,
+				`Write tests for this spec BEFORE implementation (TDD). Tests define what "done" looks like.\n\nIMPORTANT: NEVER place test files in .pi/extensions/ — that directory auto-loads files as extensions, and test files will crash the runtime. Place tests in the appropriate test directory for the package being tested (e.g. packages/coding-agent/test/).\n\n## Spec\n${specContent}\n\n## Codebase Context (from scout)\n${scoutContext}`,
 				undefined,
 				undefined,
 				signal,
@@ -643,6 +658,7 @@ async function startNightshift(
 
 			let testerContext = "";
 			if (testerResult.exitCode !== 0) {
+				await appendErrorLog(runDir, "write-tests", "tester", testerResult);
 				updatePhase(`Tester failed: ${testerResult.stderr || testerResult.errorMessage}`);
 				// Non-fatal — continue without TDD tests
 			} else {
@@ -697,6 +713,7 @@ async function startNightshift(
 				planOutput = getFinalOutput(planResult.messages);
 
 				if (planResult.exitCode !== 0) {
+					await appendErrorLog(runDir, `plan-v${planVersion}`, "planner", planResult);
 					failPhase(`Planner failed: ${planResult.stderr || planResult.errorMessage}`);
 					break; // Don't retry on hard failure
 				}
@@ -939,6 +956,7 @@ async function startNightshift(
 			emitChildLinked(pi, workerResult, currentSpec, "implement");
 
 			if (workerResult.exitCode !== 0) {
+				await appendErrorLog(runDir, "implement", "worker", workerResult);
 				failPhase(`Worker failed: ${workerResult.stderr || workerResult.errorMessage}`);
 				specFailed = true;
 				throw new Error("Worker failed");
