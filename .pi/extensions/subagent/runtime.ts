@@ -63,7 +63,8 @@ export const SUBAGENT_INSTRUCTION =
 	"- When you need to make a decision, choose the most reasonable option based on the context.\n" +
 	'- Always document your assumptions clearly under an "## Assumptions" section in your response.\n' +
 	'- Format each assumption as: "- [assumption]: [reasoning]"\n' +
-	"- Prefer safe, reversible decisions when possible.";
+	"- Prefer safe, reversible decisions when possible.\n" +
+	"- NEVER create or write files in .pi/extensions/ — that directory auto-loads all .ts/.js files as extensions. Writing test files, temp files, or anything else there will crash the runtime.";
 
 // ── Functions ──────────────────────────────────────────────────────
 
