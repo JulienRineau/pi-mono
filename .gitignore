@@ -38,5 +38,6 @@ plans/
 .pi/hf-sessions/
 .pi/nightshift/
 .pi/specs/
+.pi/traces/
 .pi/HARNESS_CHANGELOG.md
 collect.sh
