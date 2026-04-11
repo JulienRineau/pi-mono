@@ -1,8 +1,8 @@
 /**
  * Bash Guard Extension
  *
- * Blocks destructive bash commands (git checkout --force, git clean, git reset --hard, etc.)
- * for all pi sessions. Enforced at the tool_call event level — the LLM cannot bypass it.
+ * Blocks destructive bash commands and enforces test file creation via the test tool.
+ * Enforced at the tool_call event level — the LLM cannot bypass it.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -20,15 +20,28 @@ const DESTRUCTIVE_PATTERNS: { pattern: RegExp; description: string }[] = [
 
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event) => {
-		if (event.toolName !== "bash") return;
-		const cmd = (event.input as any).command as string;
-		if (!cmd) return;
+		// Block destructive bash commands
+		if (event.toolName === "bash") {
+			const cmd = (event.input as any).command as string;
+			if (!cmd) return;
 
-		for (const { pattern, description } of DESTRUCTIVE_PATTERNS) {
-			if (pattern.test(cmd)) {
+			for (const { pattern, description } of DESTRUCTIVE_PATTERNS) {
+				if (pattern.test(cmd)) {
+					return {
+						block: true,
+						reason: `Blocked: "${description}" is a destructive command. Use a non-destructive alternative or run it manually in the terminal.`,
+					};
+				}
+			}
+		}
+
+		// Block direct writes to test directories — use the test tool instead
+		if (event.toolName === "write" || event.toolName === "edit") {
+			const filePath = (event.input as any).file_path as string;
+			if (filePath && /packages\/[^/]+\/test\//.test(filePath)) {
 				return {
 					block: true,
-					reason: `Blocked: "${description}" is a destructive command. Use a non-destructive alternative or run it manually in the terminal.`,
+					reason: 'Use the test tool to create test files: test({ action: "create", type: "permanent"|"temporary", package: "...", filename: "...", content: "..." }). Direct writes to test directories are blocked.',
 				};
 			}
 		}

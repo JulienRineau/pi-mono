@@ -39,69 +39,50 @@ Read 2-3 existing test files to learn:
 
 ### 3. Write Tests
 
-For each acceptance criterion, write at least one test:
+Write two types of tests using the `test` tool:
 
-```typescript
-// Example structure (adapt to project conventions)
-describe("Feature: {spec title}", () => {
-  describe("Acceptance Criteria", () => {
-    it("should {criterion 1 reworded as test}", () => {
-      // Arrange - set up test data
-      // Act - call the function/endpoint
-      // Assert - verify expected outcome
-    });
-    
-    it("should {criterion 2}", () => { ... });
-  });
-  
-  describe("Edge Cases", () => {
-    it("should handle empty input", () => { ... });
-    it("should handle maximum values", () => { ... });
-  });
-  
-  describe("Error Cases", () => {
-    it("should reject invalid input", () => { ... });
-    it("should handle missing dependencies", () => { ... });
-  });
-});
+**Permanent tests** — committed with the code, run forever via `npm test`:
 ```
+test({
+  action: "create",
+  type: "permanent",
+  package: "coding-agent",
+  filename: "web-tools.test.ts",
+  content: "import { ... } from '../src/...';\n\ndescribe('web tools', () => { ... });",
+  plan: "plans/2026-04-09-move-web-tools-v1.md"
+})
+```
+
+**Temporary tests** — implementation scaffolding, cleaned up after nightshift:
+```
+test({
+  action: "create",
+  type: "temporary",
+  package: "coding-agent",
+  filename: "web-tools-impl.test.ts",
+  content: "import { ... } from '../src/...';\n\ndescribe('web tools implementation', () => { ... });",
+  plan: "plans/2026-04-09-move-web-tools-v1.md"
+})
+```
+
+Use relative imports from the test directory (e.g., `../src/core/tools/web-search.js`). Follow existing test conventions exactly.
+
+**IMPORTANT:** Do NOT use `write` or `edit` to create test files. Always use the `test` tool with `action: "create"`.
 
 ### 4. Run Tests
 
-```bash
-npm test -- --filter {test-file-pattern}  # or project-specific command
+Use the `test` tool to run:
+```
+test({ action: "run", plan: "plans/2026-04-09-move-web-tools-v1.md" })
 ```
 
 **Expected result: ALL tests fail.** This is correct — nothing is implemented yet.
 
 - If all fail → good, proceed
-- If some pass → investigate: does the feature already exist? Is the test checking the wrong thing?
-- If tests can't even parse/compile → fix imports and types first
+- If some pass → investigate: does the feature already exist? Is the test is wrong?
+- If tests can't parse/compile → fix imports and types, then re-create via `test` tool
 
-### 5. Register Tests
-
-After writing tests, register them with the `test` tool so the nightshift loop can run them targeted:
-
-```
-test({
-  "action": "register",
-  "plan": "plans/2026-04-02-add-auth-v1.md",
-  "spec": "specs/2026-04-02-fix-auth-timeout.md",
-  "files": ["src/__tests__/auth.test.ts", "src/__tests__/auth-middleware.test.ts"],
-  "count": 12
-})
-```
-
-This records the mapping in `tests/nightshift-manifest.json`. The test files stay in their project-standard locations.
-
-### 6. Commit
-
-```bash
-git add {test files}
-git commit -m "test: add tests for {spec title} (all failing — TDD)"
-```
-
-### 7. Report
+### 5. Report
 
 Provide:
 - List of test files created with paths
@@ -111,10 +92,12 @@ Provide:
 
 ## Rules
 
-- **Follow existing patterns exactly.** Same framework, same directory structure, same naming, same assertion style.
-- **Don't mock unnecessarily.** If the project uses integration tests, write integration tests. If it uses mocks, use the same mock patterns.
-- **Test behavior, not implementation.** Test what the function returns or what side effects occur, not how it does it internally.
-- **Each acceptance criterion = at least one test.** This is the minimum. Edge cases and error cases add more.
+- **Use the test tool.** Never write test files directly with `write` or `edit`.
+- **Follow existing patterns exactly.** Same framework, same directory, same naming, same assertion style.
+- **Don't mock unnecessarily.** If the project uses integration tests, write integration tests.
+- **Test behavior, not implementation.** Test what the function returns, not how it does it internally.
+- **Each acceptance criterion = at least one test.** Edge cases and error cases add more.
 - **Tests must be runnable immediately.** Correct imports, proper setup/teardown, no missing dependencies.
 - **Don't write implementation code.** You write tests only. The worker will implement.
 - **Don't import things that don't exist yet.** If the plan says "create `src/auth.ts` with `validateToken()`", your test should import from that path — it will fail with "module not found" and that's correct.
+- **No hacks.** No symlinks, no workarounds. If imports don't resolve, fix the import path.
