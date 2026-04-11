@@ -51,18 +51,33 @@ export interface TestDetails {
 
 const TestParams = Type.Object({
 	action: Type.Union([
+		Type.Literal("create"),
 		Type.Literal("register"),
 		Type.Literal("run"),
 		Type.Literal("run-all"),
+		Type.Literal("cleanup"),
 		Type.Literal("list"),
 		Type.Literal("status"),
 	]),
 
-	// For register
+	// For create
+	type: Type.Optional(
+		Type.Union([Type.Literal("permanent"), Type.Literal("temporary")], {
+			description: "permanent = committed with code, temporary = deleted after nightshift run",
+		}),
+	),
+	package: Type.Optional(Type.String({ description: 'Package name (e.g., "coding-agent", "ai", "agent")' })),
+	filename: Type.Optional(Type.String({ description: "Test filename (e.g., web-tools.test.ts)" })),
+	content: Type.Optional(Type.String({ description: "Full test file content" })),
+
+	// For register / run
 	plan: Type.Optional(Type.String({ description: "Plan file path (e.g., plans/2026-04-02-add-auth-v1.md)" })),
 	spec: Type.Optional(Type.String({ description: "Spec file path" })),
 	files: Type.Optional(Type.Array(Type.String(), { description: "Test file paths to register" })),
 	count: Type.Optional(Type.Integer({ description: "Number of test cases" })),
+
+	// For cleanup
+	run_dir: Type.Optional(Type.String({ description: "Nightshift run directory to move temporary tests to" })),
 });
 
 export type TestParams = typeof TestParams.static;
@@ -157,6 +172,119 @@ function buildFilteredTestCommand(cwd: string, files: string[]): string | null {
 }
 
 // ── Actions ────────────────────────────────────────────────────────
+
+export async function createTest(
+	params: { type?: string; package?: string; filename?: string; content?: string; plan?: string; spec?: string },
+	ctx: ExtensionContext,
+): Promise<AgentToolResult<TestDetails>> {
+	if (!params.type || !params.package || !params.filename || !params.content) {
+		return errorResult(
+			paramError("test", "create", ["type", "package", "filename", "content"], params as Record<string, unknown>),
+		);
+	}
+
+	// Validate filename
+	if (!/\.(test|spec)\.(ts|js)$/.test(params.filename)) {
+		return errorResult(`Invalid test filename: "${params.filename}". Must end with .test.ts, .spec.ts, .test.js, or .spec.js`);
+	}
+
+	// Validate package exists
+	const pkgDir = path.join(ctx.cwd, "packages", params.package);
+	if (!existsSync(pkgDir)) {
+		const available = existsSync(path.join(ctx.cwd, "packages"))
+			? require("node:fs").readdirSync(path.join(ctx.cwd, "packages")).join(", ")
+			: "none";
+		return errorResult(`Package "${params.package}" not found. Available: ${available}`);
+	}
+
+	// Determine target path
+	const testDir =
+		params.type === "temporary"
+			? path.join(pkgDir, "test", "nightshift")
+			: path.join(pkgDir, "test");
+
+	await fs.mkdir(testDir, { recursive: true });
+	const filePath = path.join(testDir, params.filename);
+	const relativePath = path.relative(ctx.cwd, filePath);
+
+	await fs.writeFile(filePath, params.content, "utf-8");
+
+	// Auto-register in manifest if plan is provided
+	if (params.plan) {
+		const manifest = await readManifest(ctx);
+		const entry = manifest[params.plan] || { files: [], created: new Date().toISOString(), count: 0 };
+		if (!entry.files.includes(relativePath)) {
+			entry.files.push(relativePath);
+		}
+		if (params.spec) entry.spec = params.spec;
+		manifest[params.plan] = entry;
+		await writeManifest(ctx, manifest);
+	}
+
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Created ${params.type} test: ${relativePath}`,
+			},
+		],
+		details: {
+			files: [relativePath],
+			summary: `Created ${params.type} test at ${relativePath}`,
+		},
+	};
+}
+
+export async function cleanupTemporaryTests(
+	params: { run_dir?: string },
+	ctx: ExtensionContext,
+): Promise<AgentToolResult<TestDetails>> {
+	const packagesDir = path.join(ctx.cwd, "packages");
+	if (!existsSync(packagesDir)) {
+		return { content: [{ type: "text", text: "No packages directory found" }], details: {} };
+	}
+
+	const moved: string[] = [];
+	const packages = require("node:fs").readdirSync(packagesDir);
+
+	for (const pkg of packages) {
+		const nightshiftTestDir = path.join(packagesDir, pkg, "test", "nightshift");
+		if (!existsSync(nightshiftTestDir)) continue;
+
+		const files = await fs.readdir(nightshiftTestDir);
+		for (const file of files) {
+			const src = path.join(nightshiftTestDir, file);
+			const stat = await fs.stat(src);
+			if (!stat.isFile()) continue;
+
+			// Move to run directory if provided
+			if (params.run_dir) {
+				const destDir = path.join(params.run_dir, "tests");
+				await fs.mkdir(destDir, { recursive: true });
+				await fs.copyFile(src, path.join(destDir, file));
+			}
+
+			await fs.unlink(src);
+			moved.push(path.relative(ctx.cwd, src));
+		}
+
+		// Remove empty nightshift directory
+		try {
+			await fs.rmdir(nightshiftTestDir);
+		} catch {
+			/* not empty */
+		}
+	}
+
+	const summary = moved.length > 0
+		? `Cleaned up ${moved.length} temporary test(s):\n${moved.map((f) => `  - ${f}`).join("\n")}`
+		: "No temporary tests to clean up";
+
+	return {
+		content: [{ type: "text", text: summary }],
+		details: { files: moved, count: moved.length },
+	};
+}
 
 export async function registerTests(
 	params: { plan?: string; spec?: string; files?: string[]; count?: number },
@@ -397,17 +525,23 @@ export function registerTestTool(pi: ExtensionAPI): void {
 		name: "test",
 		label: "Test",
 		description:
-			"Manage test files linked to plans. Register tests, run targeted test suites per plan, or run the full suite. Maintains a manifest mapping plans to test files.",
+			"Create and manage test files. Use 'create' to write test files (permanent or temporary). " +
+			"Use 'run' to run plan-specific tests, 'run-all' for the full suite. " +
+			"Use 'cleanup' to move temporary tests to the run directory before committing.",
 		parameters: TestParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			switch (params.action) {
+				case "create":
+					return await createTest(params, ctx);
 				case "register":
 					return await registerTests(params, ctx);
 				case "run":
 					return await runPlanTests(params, ctx);
 				case "run-all":
 					return await runAllTests(params, ctx);
+				case "cleanup":
+					return await cleanupTemporaryTests(params, ctx);
 				case "list":
 					return await listTests(params, ctx);
 				case "status":

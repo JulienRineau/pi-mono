@@ -33,7 +33,7 @@ import {
 import { saveReport } from "./report-tool.js";
 import { aggregateReviews } from "./review-tool.js";
 import { pickNextSpec, readSpec, updateSpecStatus } from "./spec-tool.js";
-import { runAllTests, runPlanTests } from "./test-tool.js";
+import { cleanupTemporaryTests, runAllTests, runPlanTests } from "./test-tool.js";
 
 // ── Error logging ─────────────────────────────────────────────────
 
@@ -962,6 +962,19 @@ async function startNightshift(
 				throw new Error("Worker failed");
 			}
 
+			// ── INTERMEDIATE COMMIT (safety net) ─────────────────
+			startPhase("commit", "Saving worker progress");
+			try {
+				await execAsync("git add -A", { cwd: projectRoot });
+				await execAsync('git commit -m "wip: worker implementation (pre-quality-gates)"', {
+					cwd: projectRoot,
+					encoding: "utf-8",
+				});
+				updatePhase("Worker progress saved");
+			} catch {
+				updatePhase("Nothing to commit");
+			}
+
 			// ── QUALITY GATES ────────────────────────────────────
 			startPhase("quality-gates", "Quality gates");
 			let qualityPassed = true;
@@ -1173,6 +1186,9 @@ async function startNightshift(
 					}
 				}
 			}
+
+			// ── CLEANUP TEMPORARY TESTS ──────────────────────────
+			await cleanupTemporaryTests({ run_dir: runDir }, ctx);
 
 			// ── HARNESS CHANGELOG ────────────────────────────────
 			startPhase("changelog", "Harness changelog");
