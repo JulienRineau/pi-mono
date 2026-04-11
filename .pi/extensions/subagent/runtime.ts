@@ -249,8 +249,13 @@ export async function runSingleAgent(
 		}
 	};
 
-	// Snapshot .pi/extensions/ to detect rogue files
-	const extensionsBefore = snapshotExtensionsDir(cwd ?? defaultCwd);
+	// Snapshot .pi/extensions/ to detect rogue files. The worker role is exempt:
+	// it is the only agent whose job legitimately includes creating new extension
+	// files (specs that produce `.pi/extensions/*.ts`). All other roles (planner,
+	// scout, tester, reviewer-*) have no business writing there, so the original
+	// scorched-earth sweep stays in force for them.
+	const shouldGuardExtensions = agentName !== "worker";
+	const extensionsBefore = shouldGuardExtensions ? snapshotExtensionsDir(cwd ?? defaultCwd) : null;
 
 	try {
 		// Add subagent instruction
@@ -356,8 +361,15 @@ export async function runSingleAgent(
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
-		// Remove any files the subagent created in .pi/extensions/
-		cleanupRogueExtensionFiles(cwd ?? defaultCwd, extensionsBefore);
+		// Remove any files the subagent created in .pi/extensions/ (non-worker roles only)
+		if (shouldGuardExtensions && extensionsBefore) {
+			const removed = cleanupRogueExtensionFiles(cwd ?? defaultCwd, extensionsBefore);
+			if (removed.length > 0) {
+				const msg = `[runtime] cleanup removed ${removed.length} file(s) from .pi/extensions/ after ${agentName}: ${removed.join(", ")}`;
+				currentResult.stderr += `\n${msg}\n`;
+				console.warn(msg);
+			}
+		}
 
 		if (tmpPromptPath)
 			try {
