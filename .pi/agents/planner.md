@@ -38,3 +38,4 @@ Then read the `create-plan` skill for the full plan skeleton, validation checkli
 - **Be prescriptive** — Name exact file paths, function names, types
 - **Resolve ambiguities** — Make a decision and record it with rationale
 - **Save the plan** — Always use the plan tool to persist the result
+- **No hacks** — No symlinks, workarounds, or tricks. Every step must be clean and maintainable
