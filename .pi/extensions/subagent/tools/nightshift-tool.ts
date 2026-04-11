@@ -498,6 +498,19 @@ async function startNightshift(
 	};
 
 	const emit = () => {
+		pi.events.emit("trace.nightshift", {
+			event: "phase",
+			state: currentState,
+			spec: currentSpec,
+			timeline: timeline.map((e) => ({
+				phase: e.phase,
+				status: e.status,
+				message: e.message ?? e.label,
+				startedAt: e.startedAt,
+				endedAt: e.endedAt,
+				durationMs: e.durationMs,
+			})),
+		});
 		if (!onUpdate) return;
 		onUpdate({
 			content: [{ type: "text", text: `[${currentState}] ${timeline.at(-1)?.message || timeline.at(-1)?.label || ""}` }],
@@ -1067,7 +1080,7 @@ async function startNightshift(
 			// Step 3: TypeScript check
 			if (existsSync(path.join(projectRoot, "tsconfig.json"))) {
 				try {
-					await execAsync("npx tsc --noEmit", { cwd: projectRoot, encoding: "utf-8", timeout: 120000 });
+					await execAsync("npx tsgo --noEmit", { cwd: projectRoot, encoding: "utf-8", timeout: 120000 });
 				} catch {
 					updatePhase("TypeScript errors detected");
 					qualityPassed = false;
