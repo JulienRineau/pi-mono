@@ -13,6 +13,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { getArtifactBaseDir, paramError } from "./validation.js";
 
 // Types
 export type PlanStatus = "draft" | "approved" | "in-progress" | "completed" | "abandoned";
@@ -51,6 +52,9 @@ const PlanParams = Type.Object({
 });
 
 export type PlanParams = typeof PlanParams.static;
+
+// All known param names (for hint generation across actions)
+const ALL_PARAMS = ["plan_name", "content", "version", "name", "status", "plan_path"];
 
 // Tool Registration
 export function registerPlanTool(pi: ExtensionAPI): void {
@@ -146,12 +150,20 @@ function errorResult(error: string): AgentToolResult<PlanDetails> {
 }
 
 function findValidateScript(ctx: ExtensionContext): string | null {
-	const candidates = [
-		path.join(ctx.cwd, ".pi/extensions/subagent/scripts/validate-plan.sh"),
-		path.join(ctx.cwd, "scripts/validate-plan.sh"),
-	];
-	for (const c of candidates) {
-		if (existsSync(c)) return c;
+	// Check both ctx.cwd (may be run directory) and project root
+	const searchRoots = [ctx.cwd];
+	// If cwd is inside .pi/nightshift/, also check the project root
+	const piIdx = ctx.cwd.indexOf("/.pi/nightshift/");
+	if (piIdx !== -1) searchRoots.push(ctx.cwd.slice(0, piIdx));
+
+	for (const root of searchRoots) {
+		const candidates = [
+			path.join(root, ".pi/extensions/subagent/scripts/validate-plan.sh"),
+			path.join(root, "scripts/validate-plan.sh"),
+		];
+		for (const c of candidates) {
+			if (existsSync(c)) return c;
+		}
 	}
 	return null;
 }
@@ -173,10 +185,10 @@ async function savePlan(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<PlanDetails>> {
 	if (!params.plan_name || !params.content) {
-		return errorResult("Error: plan_name and content are required for save");
+		return errorResult(paramError("plan", "save", ["plan_name", "content"], params, ALL_PARAMS));
 	}
 
-	const plansDir = path.join(ctx.cwd, "plans");
+	const plansDir = path.join(getArtifactBaseDir(ctx.cwd), "plans");
 
 	// Ensure plans directory exists
 	await fs.mkdir(plansDir, { recursive: true });
@@ -240,7 +252,7 @@ async function updatePlan(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<PlanDetails>> {
 	if (!params.plan_path || !params.content) {
-		return errorResult("Error: plan_path and content are required for update");
+		return errorResult(paramError("plan", "update", ["plan_path", "content"], params, ALL_PARAMS));
 	}
 
 	const filepath = path.isAbsolute(params.plan_path) ? params.plan_path : path.join(ctx.cwd, params.plan_path);
@@ -268,10 +280,10 @@ async function updateStatus(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<PlanDetails>> {
 	if (!params.name || !params.status) {
-		return errorResult("Error: name and status are required");
+		return errorResult(paramError("plan", "update-status", ["name", "status"], params, ALL_PARAMS));
 	}
 
-	const plansDir = path.join(ctx.cwd, "plans");
+	const plansDir = path.join(getArtifactBaseDir(ctx.cwd), "plans");
 
 	if (!existsSync(plansDir)) {
 		return errorResult("No plans directory exists");
@@ -313,7 +325,7 @@ async function updateStatus(
 
 async function readPlan(params: { plan_path?: string }, ctx: ExtensionContext): Promise<AgentToolResult<PlanDetails>> {
 	if (!params.plan_path) {
-		return errorResult("Error: plan_path is required");
+		return errorResult(paramError("plan", "read", ["plan_path"], params, ALL_PARAMS));
 	}
 
 	const filepath = path.isAbsolute(params.plan_path) ? params.plan_path : path.join(ctx.cwd, params.plan_path);
@@ -345,7 +357,7 @@ async function readPlan(params: { plan_path?: string }, ctx: ExtensionContext): 
 }
 
 async function listPlans(_params: any, ctx: ExtensionContext): Promise<AgentToolResult<PlanDetails>> {
-	const plansDir = path.join(ctx.cwd, "plans");
+	const plansDir = path.join(getArtifactBaseDir(ctx.cwd), "plans");
 
 	if (!existsSync(plansDir)) {
 		return {

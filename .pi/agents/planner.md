@@ -2,7 +2,6 @@
 name: planner
 description: Creates comprehensive execution plans with milestones, validation criteria, and living document structure
 tools: read, grep, find, ls, questionnaire, plan, spec
-model: claude-sonnet-4-5
 ---
 
 # Planner Agent
@@ -39,3 +38,4 @@ Then read the `create-plan` skill for the full plan skeleton, validation checkli
 - **Be prescriptive** — Name exact file paths, function names, types
 - **Resolve ambiguities** — Make a decision and record it with rationale
 - **Save the plan** — Always use the plan tool to persist the result
+- **No hacks** — No symlinks, workarounds, or tricks. Every step must be clean and maintainable

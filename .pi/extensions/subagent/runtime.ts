@@ -48,9 +48,44 @@ export interface SubagentDetails {
 	results: SingleResult[];
 }
 
-export type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
+export type DisplayItem =
+	| { type: "text"; text: string }
+	| { type: "toolCall"; name: string; args: Record<string, any> };
 
 export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
+
+// ── Extensions guard ──────────────────────────────────────────────
+
+/** Snapshot files in .pi/extensions/ (top-level only) */
+function snapshotExtensionsDir(cwd: string): Set<string> {
+	const extDir = path.join(cwd, ".pi", "extensions");
+	try {
+		return new Set(fs.readdirSync(extDir));
+	} catch {
+		return new Set();
+	}
+}
+
+/** Remove any new files a subagent created in .pi/extensions/ */
+function cleanupRogueExtensionFiles(cwd: string, before: Set<string>): string[] {
+	const extDir = path.join(cwd, ".pi", "extensions");
+	const removed: string[] = [];
+	try {
+		for (const entry of fs.readdirSync(extDir)) {
+			if (!before.has(entry)) {
+				const full = path.join(extDir, entry);
+				const stat = fs.statSync(full, { throwIfNoEntry: false });
+				if (stat?.isFile()) {
+					fs.unlinkSync(full);
+					removed.push(entry);
+				}
+			}
+		}
+	} catch {
+		/* extensions dir may not exist */
+	}
+	return removed;
+}
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -61,7 +96,8 @@ export const SUBAGENT_INSTRUCTION =
 	"- When you need to make a decision, choose the most reasonable option based on the context.\n" +
 	'- Always document your assumptions clearly under an "## Assumptions" section in your response.\n' +
 	'- Format each assumption as: "- [assumption]: [reasoning]"\n' +
-	"- Prefer safe, reversible decisions when possible.";
+	"- Prefer safe, reversible decisions when possible.\n" +
+	"- NEVER create or write files in .pi/extensions/ — that directory auto-loads all .ts/.js files as extensions. Writing test files, temp files, or anything else there will crash the runtime.";
 
 // ── Functions ──────────────────────────────────────────────────────
 
@@ -110,7 +146,10 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 	return results;
 }
 
-export async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
+export async function writePromptToTempFile(
+	agentName: string,
+	prompt: string,
+): Promise<{ dir: string; filePath: string }> {
 	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
@@ -157,6 +196,7 @@ export async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	extraEnv?: Record<string, string>,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -209,6 +249,14 @@ export async function runSingleAgent(
 		}
 	};
 
+	// Snapshot .pi/extensions/ to detect rogue files. The worker role is exempt:
+	// it is the only agent whose job legitimately includes creating new extension
+	// files (specs that produce `.pi/extensions/*.ts`). All other roles (planner,
+	// scout, tester, reviewer-*) have no business writing there, so the original
+	// scorched-earth sweep stays in force for them.
+	const shouldGuardExtensions = agentName !== "worker";
+	const extensionsBefore = shouldGuardExtensions ? snapshotExtensionsDir(cwd ?? defaultCwd) : null;
+
 	try {
 		// Add subagent instruction
 		const systemPrompt = agent.systemPrompt.trim() + SUBAGENT_INSTRUCTION;
@@ -225,14 +273,11 @@ export async function runSingleAgent(
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
-			console.error(`[subagent-debug] command: ${invocation.command} ${invocation.args.join(" ")}`);
-			console.error(`[subagent-debug] cwd: ${cwd ?? defaultCwd}`);
-			console.error(`[subagent-debug] process.execPath: ${process.execPath}`);
-			console.error(`[subagent-debug] process.argv: ${JSON.stringify(process.argv)}`);
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				env: extraEnv ? { ...process.env, ...extraEnv } : undefined,
 			});
 			let buffer = "";
 
@@ -316,6 +361,16 @@ export async function runSingleAgent(
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
+		// Remove any files the subagent created in .pi/extensions/ (non-worker roles only)
+		if (shouldGuardExtensions && extensionsBefore) {
+			const removed = cleanupRogueExtensionFiles(cwd ?? defaultCwd, extensionsBefore);
+			if (removed.length > 0) {
+				const msg = `[runtime] cleanup removed ${removed.length} file(s) from .pi/extensions/ after ${agentName}: ${removed.join(", ")}`;
+				currentResult.stderr += `\n${msg}\n`;
+				console.warn(msg);
+			}
+		}
+
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);

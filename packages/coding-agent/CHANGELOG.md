@@ -28,6 +28,16 @@
 - Fixed auto-retry to treat stream failures like `request ended without sending any chunks` as transient errors ([#2892](https://github.com/badlogic/pi-mono/issues/2892))
 - Fixed interactive startup notices to render after the initial resource listing, and added a bundled Earendil startup announcement with inline image rendering for April 8 and 9, 2026. Moved the blog link above the image to avoid overlap with terminal image rendering.
 - Fixed interactive mode to warn when Anthropic subscription auth is active, so users know Anthropic third-party usage draws from extra usage and is billed per token.
+### Added
+
+- Added `web_search` tool for DuckDuckGo-based web search with JSON results
+- Added `web_fetch` tool for fetching web pages as markdown via Jina Reader
+- Added SSRF protection blocking internal/private IP ranges (localhost, 10.x.x.x, 172.16-31.x.x, 192.168.x.x, 169.254.x.x, IPv6 ranges)
+- Added `webTools` group export for unified `--tools=web` activation
+
+### Fixed
+
+- Fixed CLI help text to include `web_search` and `web_fetch` tools in available tools list
 
 ## [0.65.2] - 2026-04-06
 

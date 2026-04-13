@@ -13,6 +13,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { getArtifactBaseDir, paramError } from "./validation.js";
 
 // Types
 export type ReviewVerdict = "pass" | "fail" | "conditional";
@@ -36,12 +37,7 @@ export interface AggregateResult {
 
 // Schema
 const ReviewParams = Type.Object({
-	action: Type.Union([
-		Type.Literal("save"),
-		Type.Literal("read"),
-		Type.Literal("list"),
-		Type.Literal("aggregate"),
-	]),
+	action: Type.Union([Type.Literal("save"), Type.Literal("read"), Type.Literal("list"), Type.Literal("aggregate")]),
 
 	// For save
 	reviewer: Type.Optional(Type.String({ description: "Reviewer name (e.g., security-reviewer)" })),
@@ -55,6 +51,9 @@ const ReviewParams = Type.Object({
 });
 
 export type ReviewParams = typeof ReviewParams.static;
+
+// All known param names (for hint generation across actions)
+const ALL_PARAMS = ["reviewer", "verdict", "target", "scope", "content", "review_path"];
 
 // Tool Registration
 export function registerReviewTool(pi: ExtensionAPI): void {
@@ -111,9 +110,7 @@ export function registerReviewTool(pi: ExtensionAPI): void {
 			if (details && "all_passed" in details) {
 				const agg = details as AggregateResult;
 				const icon = agg.all_passed ? theme.fg("success", "✓") : theme.fg("warning", "◐");
-				const verdictSummary = agg.verdicts
-					.map((v) => `${v.reviewer}: ${v.verdict}`)
-					.join(", ");
+				const verdictSummary = agg.verdicts.map((v) => `${v.reviewer}: ${v.verdict}`).join(", ");
 				const lines: string[] = [];
 				lines.push(`${icon} ${verdictSummary}`);
 				if (agg.critical_items.length > 0) {
@@ -205,11 +202,11 @@ export async function saveReview(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<ReviewDetails>> {
 	if (!params.reviewer || !params.verdict || !params.target || !params.scope || !params.content) {
-		return errorResult("Error: reviewer, verdict, target, scope, and content are required for save");
+		return errorResult(paramError("review", "save", ["reviewer", "verdict", "target", "scope", "content"], params, ALL_PARAMS));
 	}
 
 	const targetSlug = slugify(params.target);
-	const reviewsDir = path.join(ctx.cwd, "reviews", targetSlug);
+	const reviewsDir = path.join(getArtifactBaseDir(ctx.cwd), "reviews", targetSlug);
 
 	// Ensure reviews directory exists
 	await fs.mkdir(reviewsDir, { recursive: true });
@@ -230,8 +227,12 @@ export async function saveReview(
 
 	const fullContent = `${frontmatter}\n\n${params.content}`;
 
-	// Run validation script before writing
-	const scriptPath = path.join(ctx.cwd, "scripts", "validate-review.sh");
+	// Run validation script before writing — check both cwd and project root
+	let scriptPath = path.join(ctx.cwd, "scripts", "validate-review.sh");
+	const piIdx = ctx.cwd.indexOf("/.pi/nightshift/");
+	if (!existsSync(scriptPath) && piIdx !== -1) {
+		scriptPath = path.join(ctx.cwd.slice(0, piIdx), "scripts", "validate-review.sh");
+	}
 	if (existsSync(scriptPath)) {
 		try {
 			execSync(`bash "${scriptPath}" -`, {
@@ -266,12 +267,10 @@ async function readReview(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<ReviewDetails>> {
 	if (!params.review_path) {
-		return errorResult("Error: review_path is required");
+		return errorResult(paramError("review", "read", ["review_path"], params, ALL_PARAMS));
 	}
 
-	const filepath = path.isAbsolute(params.review_path)
-		? params.review_path
-		: path.join(ctx.cwd, params.review_path);
+	const filepath = path.isAbsolute(params.review_path) ? params.review_path : path.join(ctx.cwd, params.review_path);
 
 	if (!existsSync(filepath)) {
 		return errorResult(`Review not found: ${params.review_path}`);
@@ -299,11 +298,11 @@ async function listReviews(
 	ctx: ExtensionContext,
 ): Promise<AgentToolResult<ReviewDetails>> {
 	if (!params.target) {
-		return errorResult("Error: target is required for list");
+		return errorResult(paramError("review", "list", ["target"], params, ALL_PARAMS));
 	}
 
 	const targetSlug = slugify(params.target);
-	const reviewsDir = path.join(ctx.cwd, "reviews", targetSlug);
+	const reviewsDir = path.join(getArtifactBaseDir(ctx.cwd), "reviews", targetSlug);
 
 	if (!existsSync(reviewsDir)) {
 		return {
@@ -340,10 +339,11 @@ async function listReviews(
 export async function aggregateReviews(
 	params: { target?: string },
 	ctx: ExtensionContext,
+	basePath?: string,
 ): Promise<AgentToolResult<AggregateResult>> {
 	if (!params.target) {
 		return {
-			content: [{ type: "text", text: "Error: target is required for aggregate" }],
+			content: [{ type: "text", text: paramError("review", "aggregate", ["target"], params as Record<string, unknown>, ALL_PARAMS) }],
 			details: {
 				all_passed: false,
 				verdicts: [],
@@ -355,7 +355,7 @@ export async function aggregateReviews(
 	}
 
 	const targetSlug = slugify(params.target);
-	const reviewsDir = path.join(ctx.cwd, "reviews", targetSlug);
+	const reviewsDir = path.join(basePath ?? ctx.cwd, "reviews", targetSlug);
 
 	if (!existsSync(reviewsDir)) {
 		return {
