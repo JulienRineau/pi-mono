@@ -1203,36 +1203,88 @@ async function startNightshift(
 			// ── CLEANUP TEMPORARY TESTS ──────────────────────────
 			await cleanupTemporaryTests({ run_dir: runDir }, ctx);
 
-			// ── HARNESS CHANGELOG ────────────────────────────────
-			startPhase("changelog", "Harness changelog");
-			const changelogPath = path.join(projectRoot, ".pi", "HARNESS_CHANGELOG.md");
-			let changelogContent = "";
+			// ── CHANGELOG ────────────────────────────────────────
+			startPhase("changelog", "Changelog");
+			const changelogUpdated: string[] = [];
+
+			// Check if .pi/ paths were changed → update harness changelog
 			try {
-				changelogContent = await fs.readFile(changelogPath, "utf-8");
+				const { stdout: piDiff } = await execAsync(`git diff --name-only main...HEAD -- .pi/`, {
+					cwd: projectRoot,
+					encoding: "utf-8",
+				});
+				if (piDiff.trim().length > 0) {
+					const harnessPath = path.join(projectRoot, ".pi", "HARNESS_CHANGELOG.md");
+					let harnessContent = "";
+					try {
+						harnessContent = await fs.readFile(harnessPath, "utf-8");
+					} catch {
+						/* new file */
+					}
+					const entry = [
+						`## ${new Date().toISOString().split("T")[0]} — ${specTitle}`,
+						``,
+						`- Spec: ${currentSpec}`,
+						`- Branch: ${branchName}`,
+						`- Run: ${path.basename(runDir)}`,
+						`- Plan: ${planPath}`,
+						`- Review: ${implApproved ? "approved" : "conditional"}`,
+						``,
+					].join("\n");
+					if (harnessContent.startsWith("# Harness Changelog")) {
+						const headerEnd = harnessContent.indexOf("\n\n") + 2;
+						harnessContent = harnessContent.slice(0, headerEnd) + entry + harnessContent.slice(headerEnd);
+					} else {
+						harnessContent = `# Harness Changelog\n\n${entry}${harnessContent}`;
+					}
+					await fs.writeFile(harnessPath, harnessContent, "utf-8");
+					changelogUpdated.push(".pi/HARNESS_CHANGELOG.md");
+				}
 			} catch {
-				/* new file */
+				/* git diff may fail if main doesn't exist */
 			}
 
-			const changelogEntry = [
-				`## ${new Date().toISOString().split("T")[0]} — ${specTitle}`,
-				``,
-				`- Spec: ${currentSpec}`,
-				`- Branch: ${branchName}`,
-				`- Run: ${path.basename(runDir)}`,
-				`- Plan: ${planPath}`,
-				`- Review: ${implApproved ? "approved" : "conditional"}`,
-				``,
-			].join("\n");
+			// Check changed packages → update each package's CHANGELOG.md
+			try {
+				const changedPkgs = await getChangedPackages(projectRoot);
+				for (const pkg of changedPkgs) {
+					const pkgChangelogPath = path.join(projectRoot, "packages", pkg, "CHANGELOG.md");
+					try {
+						let content = await fs.readFile(pkgChangelogPath, "utf-8");
+						const entry = `- ${specTitle} (nightshift: ${branchName})\n`;
+						const unreleasedIdx = content.indexOf("[Unreleased]");
+						if (unreleasedIdx !== -1) {
+							// Insert after the [Unreleased] heading and any blank lines
+							const afterHeading = content.indexOf("\n", unreleasedIdx) + 1;
+							let insertAt = afterHeading;
+							while (insertAt < content.length && content[insertAt] === "\n") insertAt++;
+							// Find or create the appropriate subsection
+							const nextSection = content.indexOf("\n## ", afterHeading);
+							const sectionEnd = nextSection !== -1 ? nextSection : content.length;
+							const sectionContent = content.slice(afterHeading, sectionEnd);
+							if (!sectionContent.includes(entry.trim())) {
+								content = content.slice(0, insertAt) + entry + content.slice(insertAt);
+							}
+						} else {
+							// No [Unreleased] — prepend after first heading
+							const firstNewline = content.indexOf("\n") + 1;
+							content = content.slice(0, firstNewline) + `\n## [Unreleased]\n\n${entry}\n` + content.slice(firstNewline);
+						}
+						await fs.writeFile(pkgChangelogPath, content, "utf-8");
+						changelogUpdated.push(`packages/${pkg}/CHANGELOG.md`);
+					} catch {
+						/* no CHANGELOG.md for this package — skip */
+					}
+				}
+			} catch {
+				/* getChangedPackages may fail */
+			}
 
-			if (changelogContent.startsWith("# Harness Changelog")) {
-				const headerEnd = changelogContent.indexOf("\n\n") + 2;
-				changelogContent = changelogContent.slice(0, headerEnd) + changelogEntry + changelogContent.slice(headerEnd);
+			if (changelogUpdated.length > 0) {
+				updatePhase(`Updated ${changelogUpdated.join(", ")}`);
 			} else {
-				changelogContent = `# Harness Changelog\n\n${changelogEntry}${changelogContent}`;
+				updatePhase("No changelogs to update");
 			}
-
-			await fs.writeFile(changelogPath, changelogContent, "utf-8");
-			updatePhase("Updated .pi/HARNESS_CHANGELOG.md");
 
 			// ── COMMIT ───────────────────────────────────────────
 			startPhase("commit", "Commit");
@@ -1352,6 +1404,70 @@ async function startNightshift(
 
 	await saveReport({ content: reportContent }, ctx, runDir || undefined);
 
+	// ── PUSH & PR ────────────────────────────────────────────────
+	let prUrl = "";
+	let pushStatus = "";
+	if (completed.length > 0) {
+		startPhase("push", "Push & PR");
+		try {
+			await execAsync(`git push -u origin ${branchName}`, {
+				cwd: projectRoot,
+				encoding: "utf-8",
+				timeout: 60000,
+			});
+			updatePhase("Branch pushed");
+
+			try {
+				const prTitle = completed.length === 1
+					? (completed[0] || branchName).replace(/\.md$/, "").replace(/^\d{4}-\d{2}-\d{2}-/, "").replace(/-/g, " ")
+					: `nightshift: ${completed.length} specs completed`;
+
+				const duration = Math.round((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 60000);
+				const prBody = [
+					`## Summary`,
+					``,
+					...completed.map((s) => `- ✅ ${s}`),
+					...failed.map((s) => `- ❌ ${s}`),
+					``,
+					`## Details`,
+					``,
+					`- **Branch:** \`${branchName}\``,
+					`- **Duration:** ${duration} minutes`,
+					`- **Commits:** ${commitCount}`,
+					``,
+					`## Run artifacts`,
+					``,
+					`- Run directory: \`.pi/nightshift/${runDir ? path.basename(runDir) : "unknown"}/\``,
+					``,
+					`---`,
+					`*Created by nightshift*`,
+				].join("\n");
+
+				const bodyFile = path.join(projectRoot, ".nightshift-pr-body.tmp");
+				await fs.writeFile(bodyFile, prBody, "utf-8");
+				const { stdout: prOutput } = await execAsync(
+					`gh pr create --draft --title "${prTitle.replace(/"/g, '\\"')}" --body-file "${bodyFile}"`,
+					{ cwd: projectRoot, encoding: "utf-8", timeout: 30000 },
+				);
+				try {
+					await fs.unlink(bodyFile);
+				} catch {
+					/* ignore */
+				}
+				prUrl = prOutput.trim();
+				updatePhase(`PR created: ${prUrl}`);
+			} catch (prErr: any) {
+				const reason = prErr.stderr || prErr.message || "unknown error";
+				updatePhase(`Branch pushed, PR creation failed: ${reason.slice(0, 200)}`);
+				pushStatus = `Branch pushed but PR creation failed: ${reason.slice(0, 200)}`;
+			}
+		} catch (pushErr: any) {
+			const reason = pushErr.stderr || pushErr.message || "unknown error";
+			updatePhase(`Push failed: ${reason.slice(0, 200)}`);
+			pushStatus = `Push failed: ${reason.slice(0, 200)} (branch is local-only)`;
+		}
+	}
+
 	currentState = "done";
 	if (runDir) {
 		await saveCheckpoint(runDir, {
@@ -1374,6 +1490,12 @@ async function startNightshift(
 		`Duration: ${Math.round((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 60000)} minutes`,
 	];
 
+	if (prUrl) {
+		resultLines.push(`PR: ${prUrl}`);
+	} else if (pushStatus) {
+		resultLines.push(pushStatus);
+	}
+
 	if (completed.length > 0) {
 		resultLines.push(
 			``,
@@ -1381,7 +1503,6 @@ async function startNightshift(
 			...completed.map((s) => `  ✓ ${s}`),
 			``,
 			`Run directory: .pi/nightshift/${runDir ? path.basename(runDir) : "unknown"}`,
-			`Harness changelog updated: .pi/HARNESS_CHANGELOG.md`,
 		);
 	}
 
