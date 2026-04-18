@@ -1,0 +1,216 @@
+@startuml Night Shift Workflow
+
+title Night Shift — Autonomous Spec Processing Loop
+
+skinparam backgroundColor white
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #333333
+skinparam sequenceLifeLineBorderColor #999999
+skinparam sequenceGroupBorderColor #AAAAAA
+skinparam noteBorderColor #CCCCCC
+skinparam sequenceBoxBorderColor #888888
+
+actor Human as H
+participant "Main Agent" as MA
+participant "Nightshift Tool\n(TypeScript state machine)" as NS
+participant "Spec Tool" as SP
+participant "Prep Script" as PR
+participant "Scout" as SC
+participant "Planner" as PL
+participant "Tester" as TS
+participant "Worker" as WK
+collections "6 Reviewers\n(parallel)" as RV
+participant "Test Tool" as TT
+participant "Linter Extension" as LT
+participant "Review Tool" as RT
+participant "Report Tool" as RP
+database "specs/" as FS_S
+database "plans/" as FS_P
+database "tests/manifest" as FS_T
+database "reviews/" as FS_R
+database "reports/" as FS_RP
+
+== Day Shift (Human) ==
+
+H -> MA : /add-spec "Fix auth timeout"
+MA -> SP : spec({ save, content })
+SP -> FS_S : Write spec file
+H -> MA : /add-spec "Add Redis caching"
+MA -> SP : spec({ save, content })
+SP -> FS_S : Write spec file
+
+note over H
+  Human writes specs, then walks away.
+  Launches the night shift before leaving.
+end note
+
+== Launch ==
+
+H -> MA : /nightshift
+MA -> NS : nightshift({ start,\nmax_specs: 10 })
+activate NS
+
+== Prep ==
+
+NS -> PR : bash prep.sh
+activate PR
+PR -> PR : Clean tree, run tests
+PR --> NS : PREP_READY
+deactivate PR
+NS -> NS : git checkout -b\nnightshift/{date}
+
+== Spec Loop ==
+
+loop For each ready spec (up to max_specs)
+
+  == Pick ==
+
+  NS -> SP : spec({ pick-next })
+  SP -> FS_S : Scan ready specs\n(bugs first, by priority)
+  SP --> NS : Next spec
+  NS -> SP : spec({ update-status:\nin-progress })
+
+  == Scout ==
+
+  NS -> SC : spawn("Find code for: {spec}")
+  activate SC
+  SC -> SC : read, grep, find
+  SC --> NS : Codebase context
+  deactivate SC
+
+  == Write Tests (TDD) ==
+
+  NS -> TS : spawn("Write tests\nfor spec + scout context")
+  activate TS
+  TS -> TS : Read spec criteria,\nwrite tests, run them
+  TS -> TT : test({ register,\nplan, files })
+  TT -> FS_T : Save mapping
+  TS --> NS : Tests written\n(all failing as expected)
+  deactivate TS
+
+  == Plan ==
+
+  NS -> PL : spawn(spec + scout context\n+ tester output)
+  activate PL
+  PL -> PL : Explore, design milestones\nto make tests pass
+  PL -> FS_P : plan({ save })\n+ validation gate
+  PL --> NS : Plan path
+  deactivate PL
+
+  == Review Plan ==
+
+  group Review Loop (max 3 iterations)
+    NS -> RV : spawn 6 reviewers\nin parallel
+    activate RV
+    RV -> FS_R : review({ save,\nscope: plan })
+    RV --> NS : 6 structured reviews
+    deactivate RV
+
+    NS -> RT : review({ aggregate })
+    RT -> FS_R : Read all reviews
+    RT --> NS : { all_passed, critical_items }
+
+    alt All passed
+      NS -> NS : Proceed
+    else Not passed
+      NS -> PL : spawn(revise plan\n+ feedback)
+      activate PL
+      PL -> FS_P : plan({ update })
+      PL --> NS : Revised plan
+      deactivate PL
+    end
+  end
+
+  == Implement ==
+
+  NS -> WK : spawn("Execute plan at {path}")
+  activate WK
+  WK -> WK : Milestone-by-milestone\nexecution
+  WK -> FS_P : plan({ update })\nliving document
+  WK --> NS : Implementation complete
+  deactivate WK
+
+  == Quality Gates ==
+
+  NS -> TT : test({ run, plan })\nplan-specific tests
+  TT -> FS_T : Read manifest
+  TT --> NS : Plan tests result
+
+  alt Plan tests fail
+    NS -> WK : spawn("Fix test failures")
+    activate WK
+    WK --> NS : Fixed
+    deactivate WK
+    NS -> TT : test({ run, plan })\nretry
+  end
+
+  NS -> TT : test({ run-all })\nfull suite (regressions)
+  TT --> NS : Full suite result
+
+  NS -> NS : typecheck (tsc --noEmit)
+
+  NS -> LT : lint({ scope: changed-files })
+  activate LT
+  LT -> LT : Structural checks,\nimport rules, boundaries
+  LT --> NS : Lint result
+  deactivate LT
+
+  alt Lint failures
+    NS -> WK : spawn("Fix lint issues\n+ remediation hints")
+    activate WK
+    WK --> NS : Fixed
+    deactivate WK
+    NS -> LT : lint({ retry })
+  end
+
+  == Review Implementation ==
+
+  group Review Loop (max 3 iterations)
+    NS -> RV : spawn 6 reviewers\nin parallel
+    activate RV
+    RV -> FS_R : review({ save,\nscope: implementation })
+    RV --> NS : 6 structured reviews
+    deactivate RV
+
+    NS -> RT : review({ aggregate })
+    RT --> NS : { all_passed, critical_items }
+
+    alt All passed
+      NS -> NS : Proceed
+    else Not passed
+      NS -> WK : spawn(fix feedback)
+      activate WK
+      WK --> NS : Fixed
+      deactivate WK
+    end
+  end
+
+  == CHANGELOG ==
+
+  opt CHANGELOG.md exists
+    NS -> WK : spawn("Add CHANGELOG entry")
+    activate WK
+    WK --> NS : Entry added
+    deactivate WK
+  end
+
+  == Commit ==
+
+  NS -> WK : spawn("Generate detailed\ncommit message")
+  activate WK
+  WK --> NS : Commit message
+  deactivate WK
+  NS -> NS : git commit -F msg
+  NS -> SP : spec({ update-status: done })
+
+end
+
+== Finalize ==
+
+NS -> RP : report({ save })
+RP -> FS_RP : Write session report
+NS --> MA : Night shift complete:\nN completed, M failed
+deactivate NS
+MA --> H : Report ready for review
+
+@enduml
