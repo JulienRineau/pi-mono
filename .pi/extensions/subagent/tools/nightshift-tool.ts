@@ -103,6 +103,19 @@ interface TimelineEntry {
 	message?: string;
 }
 
+interface SpecResult {
+	spec: string;
+	title: string;
+	outcome: "completed" | "failed";
+	branch: string;
+	prUrl?: string;
+	runDir: string;
+	timeline: TimelineEntry[];
+	durationMs: number;
+	failedPhase?: string;
+	failedMessage?: string;
+}
+
 interface NightshiftDetails {
 	state: NightshiftState;
 	completed: number;
@@ -451,9 +464,11 @@ async function startNightshift(
 
 	const completed: string[] = [];
 	const failed: string[] = [];
+	const specResults: SpecResult[] = [];
 	let currentState: NightshiftState = "prep";
 	let currentSpec: string | undefined;
-	let runDir: string = ""; // Set per-spec inside the loop
+	let currentBranchName: string = "";
+	let runDir: string = "";
 
 	stopRequested = false;
 
@@ -509,6 +524,8 @@ async function startNightshift(
 				startedAt: e.startedAt,
 				endedAt: e.endedAt,
 				durationMs: e.durationMs,
+				reviewVerdicts: e.reviewVerdicts,
+				tasks: e.tasks,
 			})),
 		});
 		if (!onUpdate) return;
@@ -532,7 +549,7 @@ async function startNightshift(
 		if (!runDir) return;
 		await saveCheckpoint(runDir, {
 			state: currentState,
-			branch: branchName,
+			branch: currentBranchName || "main",
 			completed,
 			failed,
 			startedAt,
@@ -559,19 +576,6 @@ async function startNightshift(
 			}
 		} else {
 			updatePhase("No prep script found, skipping");
-		}
-	}
-
-	// ─── BRANCH ──────────────────────────────────────────────────
-	startPhase("branch", `Branch: ${branchName}`);
-	try {
-		await execAsync(`git checkout -b "${branchName}"`, { cwd: projectRoot, encoding: "utf-8" });
-	} catch {
-		// Branch may already exist — try switching to it
-		try {
-			await execAsync(`git checkout "${branchName}"`, { cwd: projectRoot, encoding: "utf-8" });
-		} catch (err: any) {
-			return errorResult(`Failed to create/switch to branch ${branchName}: ${err.message}`);
 		}
 	}
 
@@ -618,8 +622,41 @@ async function startNightshift(
 		const specContent = specRead.content[0]?.type === "text" ? specRead.content[0].text : "";
 		const specTitle = specDetails.title || currentSpec;
 
-		// Create isolated run directory for this spec
+		// ── SPEC BOUNDARY VERIFICATION ───────────────────────
+		const verifyScript = path.join(projectRoot, ".pi/extensions/subagent/scripts/verify-spec-boundary.sh");
+		if (existsSync(verifyScript)) {
+			try {
+				await execAsync(`bash "${verifyScript}"`, { cwd: projectRoot, encoding: "utf-8", timeout: 30000 });
+			} catch (err: any) {
+				const output = (err.stdout || err.stderr || "").toString();
+				startPhase("finalize", `Spec boundary check failed: ${output.trim()}`);
+				break;
+			}
+		}
+
+		// ── PER-SPEC BRANCH ─────────────────────────────────
 		const specSlug = slugifySpec(currentSpec);
+		currentBranchName = params.branch
+			? `${params.branch}-${specSlug}`
+			: `nightshift/${date}-${specSlug}`;
+		startPhase("branch", `Branch: ${currentBranchName}`);
+		try {
+			await execAsync(`git checkout -b "${currentBranchName}"`, { cwd: projectRoot, encoding: "utf-8" });
+		} catch {
+			try {
+				await execAsync(`git checkout "${currentBranchName}"`, { cwd: projectRoot, encoding: "utf-8" });
+			} catch (err: any) {
+				failPhase(`Failed to create branch ${currentBranchName}: ${err.message}`);
+				failed.push(currentSpec!);
+				specResults.push({
+					spec: currentSpec!, title: specTitle, outcome: "failed", branch: currentBranchName,
+					runDir: "", timeline: [...timeline], durationMs: 0, failedPhase: "branch", failedMessage: err.message,
+				});
+				continue;
+			}
+		}
+
+		// Create isolated run directory for this spec
 		runDir = await createRunDir(projectRoot, specSlug);
 		await writeActiveRun(projectRoot, runDir);
 		await fs.writeFile(path.join(runDir, "spec.md"), specContent, "utf-8");
@@ -629,6 +666,7 @@ async function startNightshift(
 		await checkpoint();
 
 		let specFailed = false;
+		const specStartedAt = Date.now();
 
 		try {
 			// ── SCOUT ────────────────────────────────────────────
@@ -1340,20 +1378,70 @@ async function startNightshift(
 				updatePhase("No new changes (worker may have committed)");
 			}
 
+			// ── PER-SPEC PUSH & PR ──────────────────────────────
+			startPhase("push", "Push & PR");
+			let specPrUrl: string | undefined;
+			try {
+				await execAsync(`git push -u origin ${currentBranchName}`, {
+					cwd: projectRoot, encoding: "utf-8", timeout: 60000,
+				});
+				updatePhase("Branch pushed");
+				try {
+					const prTitle = specTitle.replace(/\.md$/, "").replace(/^\d{4}-\d{2}-\d{2}-/, "").replace(/-/g, " ");
+					const prBody = [
+						`## Summary`,
+						``,
+						`Spec: \`${currentSpec}\``,
+						`Branch: \`${currentBranchName}\``,
+						`Run: \`${path.basename(runDir)}\``,
+						``,
+						`---`,
+						`*Created by nightshift*`,
+					].join("\n");
+					const bodyFile = path.join(projectRoot, ".nightshift-pr-body.tmp");
+					await fs.writeFile(bodyFile, prBody, "utf-8");
+					const { stdout: prOutput } = await execAsync(
+						`gh pr create --draft --title "${prTitle.replace(/"/g, '\\"')}" --body-file "${bodyFile}"`,
+						{ cwd: projectRoot, encoding: "utf-8", timeout: 30000 },
+					);
+					try { await fs.unlink(bodyFile); } catch { /* ignore */ }
+					specPrUrl = prOutput.trim();
+					updatePhase(`PR created: ${specPrUrl}`);
+				} catch (prErr: any) {
+					updatePhase(`Branch pushed, PR failed: ${(prErr.stderr || prErr.message || "").slice(0, 200)}`);
+				}
+			} catch (pushErr: any) {
+				updatePhase(`Push failed: ${(pushErr.stderr || pushErr.message || "").slice(0, 200)}`);
+			}
+
 			// Mark spec as done
 			await updateSpecStatus({ spec_path: specDetails.path, status: "done" }, ctx);
 			completed.push(currentSpec!);
+			specResults.push({
+				spec: currentSpec!, title: specTitle, outcome: "completed", branch: currentBranchName,
+				prUrl: specPrUrl, runDir, timeline: [...timeline], durationMs: Date.now() - specStartedAt,
+			});
 		} catch (err: any) {
 			if (!specFailed) specFailed = true;
 			failed.push(currentSpec!);
-			// Mark spec as blocked — prevents re-picking in this session
-			// Human reviews the report, investigates, and sets back to "ready" after fixing
+			specResults.push({
+				spec: currentSpec!, title: specTitle, outcome: "failed", branch: currentBranchName,
+				runDir, timeline: [...timeline], durationMs: Date.now() - specStartedAt,
+				failedPhase: currentState, failedMessage: err.message,
+			});
 			try {
 				await updateSpecStatus({ spec_path: specDetails.path, status: "blocked" }, ctx);
-			} catch {
-				/* ignore */
-			}
+			} catch { /* ignore */ }
 			failPhase(`Spec blocked: ${err.message}`);
+		}
+
+		// ── RETURN TO MAIN ──────────────────────────────────
+		try {
+			await execAsync("git checkout main", { cwd: projectRoot, encoding: "utf-8" });
+		} catch {
+			try {
+				await execAsync("git checkout master", { cwd: projectRoot, encoding: "utf-8" });
+			} catch { /* best effort — verification script will catch this at next iteration */ }
 		}
 
 		await checkpoint();
@@ -1362,19 +1450,9 @@ async function startNightshift(
 	// ─── FINALIZE ────────────────────────────────────────────────
 	startPhase("finalize", "Finalize");
 	const completedAt = new Date().toISOString();
+	const totalDurationMin = Math.round((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 60000);
 
-	// Count commits
-	let commitCount = 0;
-	try {
-		const { stdout: logOutput } = await execAsync(`git log --oneline ${branchName} --not main 2>/dev/null || git log --oneline -20`, {
-			cwd: projectRoot,
-			encoding: "utf-8",
-		});
-		commitCount = logOutput.trim().split("\n").filter(Boolean).length;
-	} catch {
-		/* ignore */
-	}
-
+	// Save session-level report
 	const reportContent = [
 		"---",
 		`session: ${date}`,
@@ -1382,161 +1460,108 @@ async function startNightshift(
 		`completed-at: ${completedAt}`,
 		`specs-completed: ${completed.length}`,
 		`specs-failed: ${failed.length}`,
-		`total-commits: ${commitCount}`,
 		"---",
 		"",
-		"## Completed",
-		...completed.map((s) => `- [x] ${s}`),
-		...(completed.length === 0 ? ["- (none)"] : []),
-		"",
-		"## Failed / Blocked",
-		...failed.map((s) => `- [ ] ${s}`),
-		...(failed.length === 0 ? ["- (none)"] : []),
-		"",
-		"## Key Decisions",
-		"- See individual plan decision logs for details",
+		...specResults.map((sr) => {
+			const icon = sr.outcome === "completed" ? "✅" : "❌";
+			const prLink = sr.prUrl ? ` → [PR](${sr.prUrl})` : "";
+			return `- ${icon} ${sr.spec}${prLink} (${Math.round(sr.durationMs / 60000)}min, branch: \`${sr.branch}\`)`;
+		}),
 		"",
 		"## Summary",
-		`Processed ${completed.length + failed.length} specs: ${completed.length} completed, ${failed.length} failed.`,
-		`Branch: ${branchName}`,
-		`Duration: ${Math.round((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 60000)} minutes`,
+		`Processed ${specResults.length} specs: ${completed.length} completed, ${failed.length} failed.`,
+		`Duration: ${totalDurationMin} minutes`,
 	].join("\n");
 
-	await saveReport({ content: reportContent }, ctx, runDir || undefined);
-
-	// ── PUSH & PR ────────────────────────────────────────────────
-	let prUrl = "";
-	let pushStatus = "";
-	if (completed.length > 0) {
-		startPhase("push", "Push & PR");
-		try {
-			await execAsync(`git push -u origin ${branchName}`, {
-				cwd: projectRoot,
-				encoding: "utf-8",
-				timeout: 60000,
-			});
-			updatePhase("Branch pushed");
-
-			try {
-				const prTitle = completed.length === 1
-					? (completed[0] || branchName).replace(/\.md$/, "").replace(/^\d{4}-\d{2}-\d{2}-/, "").replace(/-/g, " ")
-					: `nightshift: ${completed.length} specs completed`;
-
-				const duration = Math.round((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 60000);
-				const prBody = [
-					`## Summary`,
-					``,
-					...completed.map((s) => `- ✅ ${s}`),
-					...failed.map((s) => `- ❌ ${s}`),
-					``,
-					`## Details`,
-					``,
-					`- **Branch:** \`${branchName}\``,
-					`- **Duration:** ${duration} minutes`,
-					`- **Commits:** ${commitCount}`,
-					``,
-					`## Run artifacts`,
-					``,
-					`- Run directory: \`.pi/nightshift/${runDir ? path.basename(runDir) : "unknown"}/\``,
-					``,
-					`---`,
-					`*Created by nightshift*`,
-				].join("\n");
-
-				const bodyFile = path.join(projectRoot, ".nightshift-pr-body.tmp");
-				await fs.writeFile(bodyFile, prBody, "utf-8");
-				const { stdout: prOutput } = await execAsync(
-					`gh pr create --draft --title "${prTitle.replace(/"/g, '\\"')}" --body-file "${bodyFile}"`,
-					{ cwd: projectRoot, encoding: "utf-8", timeout: 30000 },
-				);
-				try {
-					await fs.unlink(bodyFile);
-				} catch {
-					/* ignore */
-				}
-				prUrl = prOutput.trim();
-				updatePhase(`PR created: ${prUrl}`);
-			} catch (prErr: any) {
-				const reason = prErr.stderr || prErr.message || "unknown error";
-				updatePhase(`Branch pushed, PR creation failed: ${reason.slice(0, 200)}`);
-				pushStatus = `Branch pushed but PR creation failed: ${reason.slice(0, 200)}`;
-			}
-		} catch (pushErr: any) {
-			const reason = pushErr.stderr || pushErr.message || "unknown error";
-			updatePhase(`Push failed: ${reason.slice(0, 200)}`);
-			pushStatus = `Push failed: ${reason.slice(0, 200)} (branch is local-only)`;
-		}
-	}
+	// Save to the last spec's runDir or a session-level dir
+	const sessionRunDir = runDir || path.join(projectRoot, ".pi", "nightshift", `${date}-session`);
+	await saveReport({ content: reportContent }, ctx, sessionRunDir);
 
 	currentState = "done";
-	if (runDir) {
-		await saveCheckpoint(runDir, {
-			state: "done",
-			branch: branchName,
-			completed,
-			failed,
-			startedAt,
-			runDir,
-		});
-	}
 	await clearActiveRun(projectRoot);
 
-	const resultLines = [
-		`Night shift complete.`,
-		`Specs completed: ${completed.length}/${completed.length + failed.length}`,
-		`Specs failed: ${failed.length}`,
-		`Branch: ${branchName}`,
-		`Commits: ${commitCount}`,
-		`Duration: ${Math.round((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 60000)} minutes`,
-	];
-
-	if (prUrl) {
-		resultLines.push(`PR: ${prUrl}`);
-	} else if (pushStatus) {
-		resultLines.push(pushStatus);
-	}
-
-	if (completed.length > 0) {
-		resultLines.push(
-			``,
-			`Completed specs:`,
-			...completed.map((s) => `  ✓ ${s}`),
-			``,
-			`Run directory: .pi/nightshift/${runDir ? path.basename(runDir) : "unknown"}`,
-		);
-	}
-
-	if (failed.length > 0) {
-		resultLines.push(
-			``,
-			`IMPORTANT: Do NOT attempt to implement, fix, edit specs, or re-run nightshift.`,
-			`Report this failure summary to the user and WAIT for their instructions.`,
-			``,
-			`Failed specs are marked as "blocked".`,
-			`Run directory: .pi/nightshift/${runDir ? path.basename(runDir) : "unknown"}`,
-		);
-	}
-
-	// Close any running phase in the timeline
-	const lastRunning = timeline.find((e) => e.status === "running");
-	if (lastRunning) {
-		lastRunning.status = "done";
-		lastRunning.endedAt = Date.now();
-		lastRunning.durationMs = Date.now() - lastRunning.startedAt;
-	}
+	// Build formatted timeline output
+	const output = formatNightshiftSummary(specResults, completed.length, failed.length, totalDurationMin);
 
 	return {
-		content: [{ type: "text", text: resultLines.join("\n") }],
+		content: [{ type: "text", text: output }],
 		details: {
 			state: "done",
 			completed: completed.length,
 			failed: failed.length,
 			maxSpecs,
 			currentSpec,
-			elapsed: `${Math.round((Date.now() - new Date(startedAt).getTime()) / 60000)}min`,
+			elapsed: `${totalDurationMin}min`,
 			timeline: [...timeline],
+			specResults,
 		},
 	};
+}
+
+// ── Formatted Output ──────────────────────────────────────────────
+
+function formatDuration(ms: number): string {
+	const totalSec = Math.round(ms / 1000);
+	const min = Math.floor(totalSec / 60);
+	const sec = totalSec % 60;
+	return `${min}:${sec.toString().padStart(2, "0")}`;
+}
+
+function statusIcon(status: string): string {
+	if (status === "done" || status === "completed" || status === "pass") return "✓";
+	if (status === "failed" || status === "fail") return "✗";
+	if (status === "conditional") return "◐";
+	return "○";
+}
+
+function formatNightshiftSummary(
+	results: SpecResult[],
+	completedCount: number,
+	failedCount: number,
+	totalMin: number,
+): string {
+	const lines: string[] = [];
+	const totalIcon = failedCount === 0 ? "✓" : "◐";
+	const parts: string[] = [];
+	if (completedCount > 0) parts.push(`${completedCount} completed`);
+	if (failedCount > 0) parts.push(`${failedCount} failed`);
+	lines.push(`${totalIcon} Night shift: ${parts.join(", ")} (${totalMin}min)`);
+
+	for (const sr of results) {
+		const icon = sr.outcome === "completed" ? "✓" : "✗";
+		const prSuffix = sr.prUrl ? ` → ${sr.prUrl}` : "";
+		const failSuffix = sr.failedPhase ? ` — failed at ${sr.failedPhase}` : "";
+		lines.push(`  ${icon} ${sr.title || sr.spec} (${Math.round(sr.durationMs / 60000)}min)${prSuffix}${failSuffix}`);
+
+		for (const entry of sr.timeline) {
+			const eIcon = statusIcon(entry.status);
+			const dur = entry.durationMs ? formatDuration(entry.durationMs) : "0:00";
+			lines.push(`    ${eIcon} ${entry.message || entry.label}  ${dur}`);
+
+			if (entry.reviewVerdicts && entry.reviewVerdicts.length > 0) {
+				for (const rv of entry.reviewVerdicts) {
+					lines.push(`      ${statusIcon(rv.verdict)} ${rv.reviewer}: ${rv.verdict}`);
+				}
+			}
+
+			if (entry.tasks && entry.tasks.length > 0) {
+				for (const task of entry.tasks) {
+					const tIcon = task.status === "completed" ? "✓" : task.status === "cancelled" ? "✗" : "○";
+					lines.push(`      ${tIcon} ${task.id}: ${task.description}`);
+				}
+			}
+		}
+
+		lines.push("");
+	}
+
+	if (failedCount > 0) {
+		lines.push(`IMPORTANT: Do NOT attempt to implement, fix, edit specs, or re-run nightshift.`);
+		lines.push(`Report this failure summary to the user and WAIT for their instructions.`);
+		lines.push(`Failed specs are marked as "blocked".`);
+	}
+
+	return lines.join("\n");
 }
 
 // ── Tool Registration ──────────────────────────────────────────────
